@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+
+    <title>Pipeline Generator</title>
+
+    <style>
+
+        body{
+            font-family: Arial;
+            margin: 40px;
+            background: #f5f5f5;
+        }
+
+        textarea{
+
+            width: 700px;
+            height: 200px;
+            padding: 10px;
+            font-size: 16px;
+        }
+
+        button{
+
+            padding: 10px 20px;
+            margin-top: 10px;
+            margin-right: 10px;
+            cursor: pointer;
+        }
+
+        pre{
+
+            background: #222;
+            color: #00ff00;
+            padding: 20px;
+            border-radius: 10px;
+        }
+
+        .error{
+
+            color: red;
+            font-weight: bold;
+        }
+
+    </style>
+
+</head>
+
+<body>
+
+    <h1>AI Pipeline JSON Generator</h1>
+
+    <form method="POST">
+
+        <textarea
+            name="prompt"
+            placeholder="Example:
+Read employees.csv
+Convert name to uppercase
+Filter salary > 50000
+Export csv"
+        ></textarea>
+
+        <br>
+
+        <button type="submit">
+            Generate JSON
+        </button>
+
+    </form>
+
+    {% if message %}
+
+        <p class="error">
+            {{ message }}
+        </p>
+
+    {% endif %}
+
+    {% if result and result != "[]" %}
+
+        <h2>Generated JSON</h2>
+
+        <pre>{{ result }}</pre>
+
+        <a href="/view">
+
+            <button>
+                View JSON
+            </button>
+
+        </a>
+
+        <a href="/download">
+
+            <button>
+                Download JSON
+            </button>
+
+        </a>
+
+        {% if preview %}
+
+<h3>Data Preview</h3>
+
+<table border="1">
+
+    <tr>
+        {% for col in preview[0].keys() %}
+            <th>{{ col }}</th>
+        {% endfor %}
+    </tr>
+
+    {% for row in preview %}
+    <tr>
+        {% for value in row.values() %}
+            <td>{{ value }}</td>
+        {% endfor %}
+    </tr>
+    {% endfor %}
+
+</table>
+
+{% endif %}
+    {% endif %}
+
+</body>
+
+</html>

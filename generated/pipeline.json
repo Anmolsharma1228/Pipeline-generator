@@ -1,0 +1,17 @@
+[
+    {
+        "id": 178100961636982,
+        "operation": "read_excel_any",
+        "output": "dataframe",
+        "path": "book1.xlsx",
+        "sheet": "Sheet1"
+    },
+    {
+        "id": 178100961636989,
+        "operation": "add_constant",
+        "input": "dataframe",
+        "output": "dataframe",
+        "col": "salary",
+        "value": 1000
+    }
+]

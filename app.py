@@ -45,21 +45,28 @@ def home():
                     pipeline
                 )
 
-                if execution_result["type"] == "error":
+            if execution_result["type"] == "error":
 
-                    message = execution_result["message"]
+                message = execution_result["message"]
 
-                else:
+            else:
+
+                # Show preview only when requested
+                if execution_result.get("show_preview"):
 
                     preview = execution_result["data"]
 
-                    # Keep only pipeline JSON
-                    result = json.dumps(
-                        pipeline,
-                        indent=4
-                    )
+                else:
 
-                    message = "Pipeline Executed Successfully"
+                    preview = None
+
+                # Keep only pipeline JSON
+                result = json.dumps(
+                    pipeline,
+                    indent=4
+                )
+
+                message = "Pipeline Executed Successfully"
 
         except Exception as e:
 

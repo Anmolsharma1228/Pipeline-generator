@@ -27,6 +27,16 @@ def generate_pipeline(prompt):
 
     current_table = "dataframe"
 
+    # detect dataframe name
+    df_match = re.search(
+        r"into\s+dataframe\s+(\w+)",
+        prompt,
+        re.IGNORECASE
+    )
+
+    if df_match:
+        current_table = df_match.group(1)
+
     # Keep original prompt for column names
     original_prompt = prompt
 
@@ -100,9 +110,11 @@ def generate_pipeline(prompt):
 
                 if rows_value.isdigit():
                     read_op["rows"] = int(rows_value)
+                    read_op["preview"] = True
 
                 elif rows_value in number_words:
                     read_op["rows"] = number_words[rows_value]
+                    read_op["preview"] = True
 
             print("GENERATED READ OP:")
             print(read_op)
@@ -113,9 +125,8 @@ def generate_pipeline(prompt):
 # ADD NEW COLUMN
 # =====================================================
 
-
     add_col_match = re.search(
-        r"add\s+(?:new\s+)?column\s+(\w+)(?:\s+with\s+value\s+(.+?))?\s+in",
+        r"(?:add|create)\s+(?:new\s+)?column\s+(\w+)(?:\s+with\s+value\s+([^\s,]+))?",
         original_prompt,
         re.IGNORECASE
     )
@@ -124,7 +135,14 @@ def generate_pipeline(prompt):
 
         column = add_col_match.group(1)
 
-        value = add_col_match.group(2) or ""
+        value = ""
+
+        if add_col_match.group(2):
+            value = add_col_match.group(2)
+
+            # convert numeric values
+            if value.isdigit():
+                value = int(value)
 
         pipeline.append({
             "id": generate_id(),
@@ -135,31 +153,13 @@ def generate_pipeline(prompt):
             "value": value
         })
 
-    else:
-
-        simple_add_col_match = re.search(
-            r"add\s+(?:column\s+)?(\w+)\s+in",
-            original_prompt,
-            re.IGNORECASE
-        )
-
-        if simple_add_col_match:
-
-            pipeline.append({
-                "id": generate_id(),
-                "operation": "add_column",
-                "input": current_table,
-                "output": current_table,
-                "column": simple_add_col_match.group(1),
-                "value": ""
-            })
 
     # =====================================================
     # ADD CONSTANT
     # =====================================================
 
     add_match = re.search(
-        r"add\s+(\d+)\s+(?:value\s+)?to\s+(\w+)\s+column",
+        r"add\s+(\d+)\s+to\s+(\w+)",
         original_prompt,
         re.IGNORECASE
     )
@@ -167,14 +167,14 @@ def generate_pipeline(prompt):
     if add_match:
 
         value = int(add_match.group(1))
-        col = add_match.group(2)
+        column = add_match.group(2)
 
         pipeline.append({
             "id": generate_id(),
             "operation": "add_constant",
             "input": current_table,
             "output": current_table,
-            "col": col,
+            "col": column,
             "value": value
         })
 
@@ -195,6 +195,30 @@ def generate_pipeline(prompt):
         pipeline.append({
             "id": generate_id(),
             "operation": "uppercase",
+            "input": current_table,
+            "output": current_table,
+            "col": col,
+            "output_col": col
+        })
+
+
+# =====================================================
+# LOWERCASE
+# =====================================================
+
+    lowercase_match = re.search(
+        r"(?:convert|change)\s+(\w+)\s+column\s+to\s+lowercase",
+        original_prompt,
+        re.IGNORECASE
+    )
+
+    if lowercase_match:
+
+        col = lowercase_match.group(1)
+
+        pipeline.append({
+            "id": generate_id(),
+            "operation": "lowercase",
             "input": current_table,
             "output": current_table,
             "col": col,
@@ -249,6 +273,85 @@ def generate_pipeline(prompt):
             "col2": col2,
             "result": f"{col1}_x_{col2}"
         })
+
+
+        percent_match = re.search(
+         r"percent change between (\w+) and (\w+)",
+         original_prompt,
+         re.IGNORECASE
+    )
+
+# =====================================================
+# PERCENT CHANGE
+# =====================================================
+
+    percent_match = re.search(
+        r"percent change between (\w+) and (\w+)",
+        original_prompt,
+        re.IGNORECASE
+    )
+
+    if percent_match:
+
+        col1 = percent_match.group(1)
+        col2 = percent_match.group(2)
+
+        pipeline.append({
+            "id": generate_id(),
+            "operation": "percent_change",
+            "input": current_table,
+            "output": current_table,
+            "col1": col1,
+            "col2": col2,
+            "result": f"{col1}_{col2}_percent"
+        })
+
+
+        sum_match = re.search(
+            r"sum of (\w+)",
+            original_prompt,
+            re.IGNORECASE
+            )
+
+        if sum_match:
+
+            pipeline.append({
+            "id":generate_id(),
+            "operation":"aggregate",
+            "column":sum_match.group(1),
+            "agg":"sum"
+            })
+
+
+    avg_match = re.search(
+        r"(?:average|mean)\s+(\w+)",
+        original_prompt,
+        re.IGNORECASE
+    )
+
+    if avg_match:
+
+        pipeline.append({
+        "operation":"aggregate",
+        "column":avg_match.group(1),
+        "agg":"mean"
+        })
+
+
+    max_match = re.search(
+        r"max\s+(\w+)",
+        original_prompt,
+        re.IGNORECASE
+        )
+
+    if max_match:
+
+        pipeline.append({
+        "operation":"aggregate",
+        "column":max_match.group(1),
+        "agg":"max"
+        })
+
 
     # =====================================================
     # DIVIDE COLUMNS
@@ -324,12 +427,12 @@ def generate_pipeline(prompt):
             "cols": [col]
         })
 
-    # =====================================================
-    # SELECT COLUMNS
-    # =====================================================
+    # ==========================================
+# SELECT COLUMNS
+# ==========================================
 
     select_match = re.search(
-        r"keep\s+only\s+(.+?)\s+columns",
+        r"keep only (.+?) columns",
         original_prompt,
         re.IGNORECASE
     )
@@ -338,9 +441,15 @@ def generate_pipeline(prompt):
 
         cols_text = select_match.group(1)
 
+        cols = re.split(
+            r",|and",
+            cols_text
+        )
+
         cols = [
             c.strip()
-            for c in cols_text.split(",")
+            for c in cols
+            if c.strip()
         ]
 
         pipeline.append({
@@ -350,7 +459,6 @@ def generate_pipeline(prompt):
             "output": current_table,
             "cols": cols
         })
-
     # =====================================================
     # FILTER ROWS
     # =====================================================
@@ -439,20 +547,17 @@ def generate_pipeline(prompt):
     # =====================================================
 
     export_match = re.search(
-    r"(?:save|export)(?:\s+file)?\s+(?:as\s+)?([\w\-]+)\.csv",
+    r"(?:save|export).*?([\w\-]+\.csv)",
     original_prompt,
     re.IGNORECASE
 )
-
     if export_match:
-
-        output_name = export_match.group(1)
 
         pipeline.append({
             "id": generate_id(),
             "operation": "write_csv",
             "input": current_table,
-            "path": f"{output_name}.csv"
+            "path": export_match.group(1)
         })
 
 

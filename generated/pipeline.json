@@ -1,17 +1,16 @@
 [
     {
-        "id": 178100961636982,
+        "id": 178141738484099,
         "operation": "read_excel_any",
         "output": "dataframe",
         "path": "book1.xlsx",
-        "sheet": "Sheet1"
+        "rows": 10,
+        "preview": true
     },
     {
-        "id": 178100961636989,
-        "operation": "add_constant",
+        "id": 178141738484020,
+        "operation": "write_csv",
         "input": "dataframe",
-        "output": "dataframe",
-        "col": "salary",
-        "value": 1000
+        "path": "read1.csv"
     }
 ]

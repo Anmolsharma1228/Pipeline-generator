@@ -84,6 +84,30 @@ Export csv"
 
         <pre>{{ result }}</pre>
 
+        {% if preview %}
+
+<h3>Data Preview</h3>
+
+<table border="1">
+
+<tr>
+    {% for col in preview[0].keys() %}
+        <th>{{ col }}</th>
+    {% endfor %}
+</tr>
+
+{% for row in preview %}
+<tr>
+    {% for value in row.values() %}
+        <td>{{ value }}</td>
+    {% endfor %}
+</tr>
+{% endfor %}
+
+</table>
+
+{% endif %}
+
         <a href="/view">
 
             <button>
@@ -100,29 +124,7 @@ Export csv"
 
         </a>
 
-        {% if preview %}
-
-<h3>Data Preview</h3>
-
-<table border="1">
-
-    <tr>
-        {% for col in preview[0].keys() %}
-            <th>{{ col }}</th>
-        {% endfor %}
-    </tr>
-
-    {% for row in preview %}
-    <tr>
-        {% for value in row.values() %}
-            <td>{{ value }}</td>
-        {% endfor %}
-    </tr>
-    {% endfor %}
-
-</table>
-
-{% endif %}
+        
     {% endif %}
 
 </body>

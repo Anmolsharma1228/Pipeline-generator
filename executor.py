@@ -1,4 +1,4 @@
-from operations import OPERATIONS
+from operations.registry import OPERATIONS
 
 
 def execute_pipeline(pipeline):

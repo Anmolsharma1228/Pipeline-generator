@@ -43,6 +43,11 @@
             font-weight: bold;
         }
 
+        .success{
+    color:green;
+    font-weight:bold;
+}
+
     </style>
 
 </head>
@@ -70,23 +75,21 @@ Export csv"
 
     </form>
 
-    {% if message %}
+   {% if message %}
+   <p class="{% if 'success' in message.lower() %}success{% else %}error{% endif %}">
+    {{ message }}
+   </p>
 
-        <p class="error">
-            {{ message }}
-        </p>
-
-    {% endif %}
+{% endif %}
 
     {% if result and result != "[]" %}
 
         <h2>Generated JSON</h2>
-
         <pre>{{ result }}</pre>
 
         {% if preview %}
 
-<h3>Data Preview</h3>
+       <h3>Data Preview</h3>
 
 <table border="1">
 
@@ -123,7 +126,6 @@ Export csv"
             </button>
 
         </a>
-
         
     {% endif %}
 

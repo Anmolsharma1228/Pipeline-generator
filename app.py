@@ -10,75 +10,82 @@ app = Flask(__name__)
 
 @app.route("/", methods=["GET", "POST"])
 def home():
-
     result = None
     message = None
     preview = None
 
     if request.method == "POST":
-
         try:
-
             prompt = request.form["prompt"]
 
-            # Generate Pipeline
+            # Generate JSON pipeline
             result = generate_pipeline(prompt)
 
             pipeline = json.loads(result)
 
-            # Handle Parser Errors
+            # Parser error
             if isinstance(pipeline, dict):
-
                 message = pipeline.get(
                     "error",
                     "Unknown error occurred"
                 )
 
             elif len(pipeline) == 0:
-
                 message = "No valid operations found!"
 
             else:
-
-                # Execute Pipeline
+                # Execute pipeline
                 execution_result = execute_pipeline(
                     pipeline
                 )
 
-            if execution_result["type"] == "error":
+                if (
+                    execution_result
+                    and
+                    execution_result.get("type")
+                    == "error"
+                ):
+                    message = execution_result.get(
+                        "message",
+                        "Execution failed"
+                    )
 
-                message = execution_result["message"]
+                else:
+                    preview = None
+
+            if execution_result:
+
+                preview = execution_result.get(
+                    "data",
+                    None
+                )
+
+            result = json.dumps(
+                pipeline,
+                indent=4
+            )
+
+            if preview:
+
+                message = (
+                    "Pipeline Executed Successfully"
+                )
 
             else:
 
-                # Show preview only when requested
-                if execution_result.get("show_preview"):
-
-                    preview = execution_result["data"]
-
-                else:
-
-                    preview = None
-
-                # Keep only pipeline JSON
-                result = json.dumps(
-                    pipeline,
-                    indent=4
+                message = (
+                    "JSON Generated Successfully"
                 )
 
-                message = "Pipeline Executed Successfully"
-
         except Exception as e:
-
             message = str(e)
 
     return render_template(
-    "index.html",
-    result=result,
-    message=message,
-    preview=preview
-)
-
+        "index.html",
+        result=result,
+        message=message,
+        preview=preview
+    )
 
 # ==========================================
 # VIEW JSON

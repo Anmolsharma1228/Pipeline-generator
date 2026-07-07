@@ -1,20 +1,25 @@
 [
     {
-        "id": 178184404895418,
+        "id": 178340605792710,
         "operation": "read_excel_any",
         "output": "dataframe",
-        "path": "book1.xlsx"
+        "path": "empdata1.xlsx",
+        "sheet_name": "Sheet1"
     },
     {
-        "id": 178184404895719,
-        "operation": "subtract_constant",
-        "col": "salary",
-        "value": 100
+        "id": 178340605792755,
+        "operation": "select_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "cols": [
+            "fullname",
+            "salary"
+        ]
     },
     {
-        "id": 178184404895722,
+        "id": 178340605792730,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "subt.csv"
+        "path": "output.csv"
     }
 ]

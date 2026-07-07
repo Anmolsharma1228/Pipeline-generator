@@ -92,4 +92,160 @@ def parse_math(prompt):
         })
 
 
+    # ==========================
+    # DIVIDE COLUMNS
+    # ==========================
+
+    divide_match = re.search(
+        r"divide\s+(\w+)\s+by\s+(\w+)",
+        prompt,
+        re.IGNORECASE
+    )
+
+    if divide_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "divide_columns",
+
+            "col1": divide_match.group(1),
+
+            "col2": divide_match.group(2),
+
+            "result": (
+                f"{divide_match.group(1)}"
+                "_per_"
+                f"{divide_match.group(2)}"
+            )
+
+        })
+
+
+    # ==========================
+    # SUM
+    # ==========================
+
+    sum_match = re.search(
+        r"sum\s+of\s+(\w+)",
+        prompt,
+        re.IGNORECASE
+    )
+
+    if sum_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "aggregate",
+
+            "column": sum_match.group(1),
+
+            "agg": "sum"
+
+        })
+
+
+    # ==========================
+    # AVG
+    # ==========================
+
+    avg_match = re.search(
+        r"(?:average|mean)\s+(?:of\s+)?(\w+)",
+        prompt,
+        re.IGNORECASE
+    )
+
+    if avg_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "aggregate",
+
+            "column": avg_match.group(1),
+
+            "agg": "mean"
+
+        })
+
+
+    # ==========================
+    # MAX
+    # ==========================
+
+    max_match = re.search(
+        r"max\s+(?:of\s+)?(\w+)",
+        prompt,
+        re.IGNORECASE
+    )
+
+    if max_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "aggregate",
+
+            "column": max_match.group(1),
+
+            "agg": "max"
+
+        })
+
+        # ==========================
+        # GROUP AGGREGATE
+        # ==========================
+    aggregate_match = re.search(
+        r"(aggregate|sum|total|average|mean|max|min)\s+(\w+)\s+by\s+(\w+)",
+        prompt,
+        re.I
+    )
+
+    if aggregate_match:
+
+        operation = (
+            aggregate_match
+            .group(1)
+            .lower()
+        )
+
+        agg_map = {
+
+            "aggregate": "sum",
+            "sum": "sum",
+            "total": "sum",
+            "average": "mean",
+            "mean": "mean",
+            "max": "max",
+            "min": "min"
+
+        }
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "aggregate",
+
+            "input": "dataframe",
+
+            "output": "dataframe",
+
+            "column":
+            aggregate_match.group(2),
+
+            "groupby":
+            aggregate_match.group(3),
+
+            "agg":
+            agg_map[operation]
+
+        })
+
+
     return pipeline

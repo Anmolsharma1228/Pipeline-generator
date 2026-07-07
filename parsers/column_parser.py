@@ -55,7 +55,7 @@ def parse_column(prompt):
     # ==========================
 
     rename_match = re.search(
-        r"rename\s+(\w+)\s+column\s+to\s+(\w+)",
+        r"rename\s+(\w+)(?:\s+column)?\s+to\s+(\w+)",
         prompt,
         re.I
     )
@@ -158,7 +158,6 @@ def parse_column(prompt):
     # ==========================
     # SELECT COLUMNS
     # ==========================
-
     select_match = re.search(
         r"keep\s+only\s+(.+?)\s+columns",
         prompt,
@@ -166,35 +165,107 @@ def parse_column(prompt):
     )
 
     if select_match:
-
         cols_text = select_match.group(1)
-
         cols = re.split(
             r",|and",
             cols_text
         )
 
         cols = [
-
             c.strip()
-
             for c in cols
-
             if c.strip()
-
         ]
 
         pipeline.append({
 
             "id": generate_id(),
-
             "operation": "select_columns",
-
             "input": current_table,
-
             "output": current_table,
-
             "cols": cols
+
+        })
+
+
+    # ==========================
+    # COMBINE COLUMNS
+    # ==========================
+    combine_match = re.search(
+        r"combine\s+(\w+)\s+and\s+(\w+)",
+        prompt,
+        re.I
+    )
+
+    if combine_match:
+
+        pipeline.append({
+            "id": generate_id(),
+            "operation": "combine_columns",
+            "input": "dataframe",
+            "output": "dataframe",
+
+            "columns": [
+                combine_match.group(1),
+                combine_match.group(2)
+            ],
+
+            "new_column":
+            f"{combine_match.group(1)}_{combine_match.group(2)}"
+        })
+
+
+    duplicate_match = re.search(
+        r"(remove|drop)\s+duplicate[s]?\s+(\w+)\s+based\s+on\s+(\w+)",
+        prompt,
+        re.I
+    )
+
+    if duplicate_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "drop_duplicates",
+
+            "input": "dataframe",
+
+            "output": "dataframe",
+
+            "subset": [duplicate_match.group(3)]
+
+        })
+
+
+    fill_match = re.search(
+        r"replace\s+missing\s+(\w+)\s+with\s+(.+)",
+        prompt,
+        re.I
+    )
+
+    if fill_match:
+
+        value = fill_match.group(2).strip()
+
+        try:
+            value = int(value)
+        except:
+            pass
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "fill_missing",
+
+            "input": "dataframe",
+
+            "output": "dataframe",
+
+            "column": fill_match.group(1),
+
+            "value": value
 
         })
 

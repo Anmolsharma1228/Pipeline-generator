@@ -30,4 +30,46 @@ def parse_export(prompt):
 
             })
 
+ # JSON
+    json_match = re.search(
+        r"convert\s+to\s+json",
+        prompt,
+        re.I
+    )
+
+    if json_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "to_json",
+
+            "input": "dataframe",
+
+            "path": "output.json"
+        })
+
+    # HTML
+    html_match = re.search(
+        r"convert\s+to\s+html",
+        prompt,
+        re.I
+    )
+
+    if html_match:
+
+        pipeline.append({
+
+            "id": generate_id(),
+
+            "operation": "to_html",
+
+            "input": "dataframe",
+
+            "path": "output.html"
+        })
+
+
+
     return pipeline

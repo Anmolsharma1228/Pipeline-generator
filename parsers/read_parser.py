@@ -12,19 +12,17 @@ def generate_id():
 
 def parse_read(prompt):
 
-    pipeline=[]
-
-    current_table="dataframe"
-
+    pipeline = []
+    current_table = "dataframe"
     number_words = {
 
-        "one":1,
-        "two":2,
-        "three":3,
-        "five":5,
-        "ten":10,
-        "twenty":20,
-        "fifty":50
+        "one": 1,
+        "two": 2,
+        "three": 3,
+        "five": 5,
+        "ten": 10,
+        "twenty": 20,
+        "fifty": 50
 
     }
 
@@ -38,25 +36,46 @@ def parse_read(prompt):
 
         read_op = {
 
-            "id":generate_id(),
+            "id": generate_id(),
 
-            "operation":{
+            "operation": {
 
-                "csv":"read_csv",
-
-                "xlsx":"read_excel_any",
-
-                "json":"read_json"
+                "csv": "read_csv",
+                "xlsx": "read_excel_any",
+                "json": "read_json"
 
             }[
                 read_match.group(2)
             ],
 
-            "output":current_table,
+            "output": current_table,
 
-            "path":read_match.group(1)
+            "path": read_match.group(1)
 
         }
+
+        # ==========================
+        # SHEET SUPPORT
+        # ==========================
+
+        sheet_match = re.search(
+            r"(?:from\s+)?(sheet\s*\d+)",
+            prompt,
+            re.I
+        )
+
+        if sheet_match:
+
+            read_op["sheet_name"] = (
+                sheet_match
+                .group(1)
+                .replace(" ", "")
+                .title()
+            )
+
+        # ==========================
+        # ROW PREVIEW
+        # ==========================
 
         rows_match = re.search(
             r"(?:first|top)\s+(\w+)\s+(?:rows|records)",

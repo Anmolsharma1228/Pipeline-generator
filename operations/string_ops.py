@@ -56,43 +56,41 @@ def lowercase(step, df):
 
 def replace_str(step, df):
 
-    old = str(
-        step["old"]
-    ).strip()
+    print("===== REPLACE_STR EXECUTED =====")
 
-    new = str(
-        step["new"]
-    ).strip()
+    old = str(step["old"]).strip()
+    new = str(step["new"]).strip()
 
-    try:
+    col = step.get("col")
 
-        for col in df.columns:
+    print("Old:", old)
+    print("New:", new)
 
-            if df[col].dtype == "object":
+    print("\nBefore Replace:")
+    print(df.head(10))
 
-                df[col] = (
+    if col:
 
-                    df[col]
-                    .fillna("")
-                    .astype(str)
-                    .str.replace(
-                        re.escape(old),
-                        new,
-                        regex=True,
-                        case=False
-                    )
-
-                )
-
-        print(
-            f"SUCCESS: {old} → {new}"
+        df[col] = (
+            df[col]
+            .astype(str)
+            .str.replace(old, new, case=False, regex=False)
         )
 
-    except Exception as e:
+    else:
 
-       print(
-    df[["email"]].head()
-)
+        for c in df.select_dtypes(include="object").columns:
+
+            print(f"Checking column: {c}")
+
+            df[c] = (
+                df[c]
+                .astype(str)
+                .str.replace(old, new, case=False, regex=False)
+            )
+
+    print("\nAfter Replace:")
+    print(df.head(10))
 
     return df
 

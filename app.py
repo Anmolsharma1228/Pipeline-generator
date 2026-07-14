@@ -13,6 +13,7 @@ def home():
     result = None
     message = None
     preview = None
+    execution_result = None
 
     if request.method == "POST":
         try:

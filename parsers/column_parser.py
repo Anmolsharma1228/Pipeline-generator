@@ -50,36 +50,39 @@ def parse_column(prompt):
 
         })
 
+
     # ==========================
     # RENAME COLUMN
     # ==========================
 
     rename_match = re.search(
-        r"rename\s+(\w+)(?:\s+column)?\s+to\s+(\w+)",
+        r"(?:rename|change)\s+(\w+)\s+(?:to|as|into)\s+(\w+)",
         prompt,
         re.I
     )
 
     if rename_match:
 
+        old = rename_match.group(1).lower()
+        new = rename_match.group(2).lower()
+
         pipeline.append({
-
-            "id":generate_id(),
-
-            "operation":"rename_columns",
-
-            "input":current_table,
-
-            "output":current_table,
-
-            "mapping":{
-
-                rename_match.group(1):
-                rename_match.group(2)
-
+            "id": generate_id(),
+            "operation": "rename_columns",
+            "input": current_table,
+            "output": current_table,
+            "mapping": {
+                old: new
             }
-
         })
+
+        # Replace old column name in remaining prompt
+        prompt = re.sub(
+            rf"\b{re.escape(old)}\b",
+            new,
+            prompt,
+            flags=re.I
+        )
 
 
     # ==========================
@@ -87,39 +90,23 @@ def parse_column(prompt):
     # ==========================
 
     sort_match = re.search(
-        r"sort\s+by\s+(\w+)(?:\s+(ascending|descending))?",
+        r"sort(?:\s+by)?\s+(\w+)(?:\s+(ascending|descending|asc|desc))?",
         prompt,
-        re.IGNORECASE
+        re.I
     )
 
     if sort_match:
 
         column = sort_match.group(1)
-
-        order = sort_match.group(2)
-
-        ascending = True
-
-        if order:
-
-            ascending = (
-                order.lower()
-                ==
-                "ascending"
-            )
-
+        order = sort_match.group(2) or "ascending"
+        ascending = order.lower() in ["ascending", "asc"]
         pipeline.append({
 
             "id": generate_id(),
-
             "operation": "sort_values",
-
             "input": current_table,
-
             "output": current_table,
-
             "by": column,
-
             "ascending": ascending
 
         })
@@ -158,35 +145,116 @@ def parse_column(prompt):
     # ==========================
     # SELECT COLUMNS
     # ==========================
+
     select_match = re.search(
-        r"keep\s+only\s+(.+?)\s+columns",
+        r"(?:keep\s+only|need\s+only|only\s+need|select|retain|include\s+only|show\s+only)\s+(.+?)(?=\s+(?:rename|convert|change|uppercase|lowercase|replace|trim|split|extract|sort|filter|drop|save|export|write|store|finally)\b|$)",
         prompt,
-        re.IGNORECASE
+        re.I
     )
 
     if select_match:
-        cols_text = select_match.group(1)
-        cols = re.split(
-            r",|and",
+
+        cols_text = select_match.group(1).lower()
+
+        # Remove everything after sort/order if present
+        cols_text = re.sub(
+            r"\bsort\b.*",
+            "",
+            cols_text,
+            flags=re.I
+        )
+
+        cols_text = re.sub(
+            r"\border\b.*",
+            "",
+            cols_text,
+            flags=re.I
+        )
+
+        # Remove filter expressions
+        cols_text = re.sub(
+            r"\b(?:greater\s+than|more\s+than|less\s+than|above|below|over|under)\s+\d+\b",
+            "",
+            cols_text,
+            flags=re.I
+        )
+
+        cols_text = re.sub(
+            r"[><=!]=?\s*\d+",
+            "",
             cols_text
         )
 
-        cols = [
-            c.strip()
-            for c in cols
-            if c.strip()
-        ]
+        # Remove unnecessary keywords
+        cols_text = re.sub(
+            r"\b(column|columns|whose|where|then|with|having|save|export|write|store|download|finally|records|rows|employee|employees|ascending|descending|asc|desc|by)\b",
+            "",
+            cols_text,
+            flags=re.I
+        )
 
-        pipeline.append({
+        cols_text = cols_text.replace(".", " ")
+        cols_text = cols_text.replace("(", " ")
+        cols_text = cols_text.replace(")", " ")
 
-            "id": generate_id(),
-            "operation": "select_columns",
-            "input": current_table,
-            "output": current_table,
-            "cols": cols
+        cols_text = re.sub(
+            r"\s+",
+            " ",
+            cols_text
+        ).strip()
 
-        })
+        # Split by comma or "and"
+        raw_cols = re.split(
+            r",|\band\b",
+            cols_text
+        )
 
+        mapping = {
+            "name": "fullname",
+            "names": "fullname",
+            "employee": "fullname",
+            "employees": "fullname",
+            "employee name": "fullname",
+            "full name": "fullname",
+            "fullname": "fullname",
+            "city": "city",
+            "cities": "city",
+            "email": "email",
+            "emails": "email",
+            "department": "department",
+            "dept": "department",
+            "salary": "salary",
+            "bonus": "bonus"
+        }
+
+        cols = []
+
+        for col in raw_cols:
+
+            col = col.strip()
+
+            if not col:
+                continue
+
+            col = re.sub(r"\d+", "", col).strip()
+
+            # Keep only the first word if extra words remain
+            col = col.split()[0]
+
+            col = mapping.get(col, col)
+
+            if col not in cols:
+                cols.append(col)
+
+        if cols:
+
+            pipeline.append({
+                "id": generate_id(),
+                "operation": "select_columns",
+                "input": current_table,
+                "output": current_table,
+                "cols": cols
+            })
 
     # ==========================
     # COMBINE COLUMNS
@@ -214,32 +282,50 @@ def parse_column(prompt):
             f"{combine_match.group(1)}_{combine_match.group(2)}"
         })
 
+    
 
+        #==========================
+        # DROP DUPLICATES
+        #=========================
     duplicate_match = re.search(
-        r"(remove|drop)\s+duplicate[s]?\s+(\w+)\s+based\s+on\s+(\w+)",
+        r"(?:remove|drop)\s+duplicate(?:s)?(?:\s+rows)?(?:\s+based\s+on)?\s+(\w+)",
         prompt,
         re.I
     )
 
     if duplicate_match:
 
+        column = duplicate_match.group(1).lower()
+
+        mapping = {
+            "cities": "city",
+            "city": "city",
+            "departments": "department",
+            "department": "department",
+            "emails": "email",
+            "email": "email",
+            "names": "fullname",
+            "name": "fullname"
+        }
+
+        column = mapping.get(column, column)
+
         pipeline.append({
 
             "id": generate_id(),
-
             "operation": "drop_duplicates",
-
-            "input": "dataframe",
-
-            "output": "dataframe",
-
-            "subset": [duplicate_match.group(3)]
+            "input": current_table,
+            "output": current_table,
+            "subset": [column]
 
         })
 
+    # ==========================
+    # FILL MISSING VALUES
+    # ==========================
 
     fill_match = re.search(
-        r"replace\s+missing\s+(\w+)\s+with\s+(.+)",
+        r"replace\s+missing\s+(\w+)(?:\s+values?)?\s+with\s+(.+?)(?=\s+(?:keep|select|retain|sort|save|export|write|store|download|$)|,)",
         prompt,
         re.I
     )
@@ -248,23 +334,20 @@ def parse_column(prompt):
 
         value = fill_match.group(2).strip()
 
-        try:
+        # Convert numeric values
+        if value.isdigit():
             value = int(value)
-        except:
-            pass
+
+        elif re.fullmatch(r"\d+\.\d+", value):
+            value = float(value)
 
         pipeline.append({
 
             "id": generate_id(),
-
             "operation": "fill_missing",
-
-            "input": "dataframe",
-
-            "output": "dataframe",
-
+            "input": current_table,
+            "output": current_table,
             "column": fill_match.group(1),
-
             "value": value
 
         })

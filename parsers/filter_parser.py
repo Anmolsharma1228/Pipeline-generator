@@ -6,81 +6,70 @@ def parse_filter(prompt):
 
     pipeline = []
 
-    match = re.search(
-        r"(?:where|filter)\s+(\w+)\s*(?:is\s+)?(greater\s+than|less\s+than|>=|<=|>|<|==|=|!=)?\s*(\d+)",
-        prompt,
-        re.I
-    )
+    prompt = prompt.lower()
 
-    if match:
+    patterns = [
 
-        column = match.group(1)
-        operator = (
-            match.group(2) or "=="
-        ).lower()
+        # Filter salary > 40000
+        r"filter\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
 
-        value = int(
-            match.group(3)
-        )
+        # where salary > 40000
+        r"where\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
 
-        operator_map = {
-            "greater than": ">",
-            "less than": "<",
-            "=": "=="
-        }
+        # salary greater than 40000
+        r"(\w+)\s+(greater than|more than|above|over|exceeds)\s+(\d+)",
 
-        operator = operator_map.get(
-            operator,
-            operator
-        )
+        # salary less than 40000
+        r"(\w+)\s+(less than|below|under)\s+(\d+)"
+    ]
 
-        pipeline.append({
-            "id": generate_id(),
-            "operation": "filter_rows",
-            "input": "dataframe",
-            "output": "dataframe",
-            "column": column,
-            "operator": operator,
-            "value": value
-        })
+    operator_map = {
 
+        "greater than": ">",
+        "more than": ">",
+        "above": ">",
+        "over": ">",
+        "exceeds": ">",
 
-    filter_match = re.search(
-        r"keep\s+\w+\s+whose\s+(\w+)\s+is\s+greater\s+than\s+(\d+)",
-        prompt,
-        re.I
-    )
+        "less than": "<",
+        "below": "<",
+        "under": "<",
 
-    if filter_match:
+        "=": "=="
+    }
 
-        pipeline.append({
+    for pattern in patterns:
 
-            "operation":"filter_rows",
+        match = re.search(pattern, prompt, re.I)
 
-            "column":filter_match.group(1),
+        if match:
 
-            "operator":">",
+            column = match.group(1)
 
-            "value":int(filter_match.group(2))
+            operator = match.group(2)
 
-        })
+            value = int(match.group(3))
 
+            operator = operator_map.get(operator, operator)
 
-    select_match = re.search(
-        r"keep\s+(\w+)\s+whose",
-        prompt,
-        re.I
-    )
+            pipeline.append({
 
-    if select_match:
+                "id": generate_id(),
 
-        pipeline.append({
+                "operation": "filter_rows",
 
-            "operation":"select_columns",
+                "input": "dataframe",
 
-            "cols":[select_match.group(1)]
+                "output": "dataframe",
 
-        })
+                "column": column,
 
+                "operator": operator,
+
+                "value": value
+
+            })
+
+            break
 
     return pipeline

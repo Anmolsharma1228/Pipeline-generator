@@ -6,14 +6,13 @@
     <title>Pipeline Generator</title>
 
     <style>
-
-        body{
+        body {
             font-family: Arial;
             margin: 40px;
             background: #f5f5f5;
         }
 
-        textarea{
+        textarea {
 
             width: 700px;
             height: 200px;
@@ -21,7 +20,7 @@
             font-size: 16px;
         }
 
-        button{
+        button {
 
             padding: 10px 20px;
             margin-top: 10px;
@@ -29,7 +28,7 @@
             cursor: pointer;
         }
 
-        pre{
+        pre {
 
             background: #222;
             color: #00ff00;
@@ -37,17 +36,16 @@
             border-radius: 10px;
         }
 
-        .error{
+        .error {
 
             color: red;
             font-weight: bold;
         }
 
-        .success{
-    color:green;
-    font-weight:bold;
-}
-
+        .success {
+            color: green;
+            font-weight: bold;
+        }
     </style>
 
 </head>
@@ -58,14 +56,11 @@
 
     <form method="POST">
 
-        <textarea
-            name="prompt"
-            placeholder="Example:
+        <textarea name="prompt" placeholder="Example:
 Read employees.csv
 Convert name to uppercase
 Filter salary > 50000
-Export csv"
-        ></textarea>
+Export csv"></textarea>
 
         <br>
 
@@ -75,58 +70,35 @@ Export csv"
 
     </form>
 
-   {% if message %}
-   <p class="{% if 'success' in message.lower() %}success{% else %}error{% endif %}">
-    {{ message }}
-   </p>
+    {% if message %}
+    <p class="{% if 'success' in message.lower() %}success{% else %}error{% endif %}">
+        {{ message }}
+    </p>
 
-{% endif %}
+    {% endif %}
 
     {% if result and result != "[]" %}
 
-        <h2>Generated JSON</h2>
-        <pre>{{ result }}</pre>
+    <h2>Generated JSON</h2>
+    <pre>{{ result }}</pre>
 
-        {% if preview %}
 
-       <h3>Data Preview</h3>
+    <a href="/view">
 
-<table border="1">
+        <button>
+            View JSON
+        </button>
 
-<tr>
-    {% for col in preview[0].keys() %}
-        <th>{{ col }}</th>
-    {% endfor %}
-</tr>
+    </a>
 
-{% for row in preview %}
-<tr>
-    {% for value in row.values() %}
-        <td>{{ value }}</td>
-    {% endfor %}
-</tr>
-{% endfor %}
+    <a href="/download">
 
-</table>
+        <button>
+            Download JSON
+        </button>
 
-{% endif %}
+    </a>
 
-        <a href="/view">
-
-            <button>
-                View JSON
-            </button>
-
-        </a>
-
-        <a href="/download">
-
-            <button>
-                Download JSON
-            </button>
-
-        </a>
-        
     {% endif %}
 
 </body>

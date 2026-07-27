@@ -1,7 +1,10 @@
 from operations.registry import OPERATIONS
-
+from operations.column_ops import RENAMED_COLUMNS
 
 def execute_pipeline(pipeline):
+
+    # Clear old renamed columns before every execution
+    RENAMED_COLUMNS.clear()
 
     df = None
 

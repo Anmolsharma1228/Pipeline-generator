@@ -74,18 +74,24 @@ def drop_columns(step, df):
 
 def select_columns(step, df):
 
-    cols = step["cols"]
+    print("Before Select:", list(df.columns))
+    print("Requested:", step["cols"])     
 
-    # remove spaces
-    cols = [
-        c.strip()
-        for c in cols
-    ]
+    cols = []
 
-    return df[
-        cols
-    ]
+    for c in step["cols"]:
 
+        # if column doesn't exist but was renamed,
+        # use old dataframe column
+        if c not in df.columns:
+            for old, new in RENAMED_COLUMNS.items():
+                if new == c:
+                    c = old
+                    break
+
+        cols.append(c)
+        print("Selecting:", cols)
+    return df[cols]
 
 def combine_columns(step, dfs):
 

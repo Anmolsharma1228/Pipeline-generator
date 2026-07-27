@@ -1,6 +1,6 @@
 from flask import Flask, render_template, request, send_file
 from parser import generate_pipeline
-from executor import execute_pipeline
+# from executor import execute_pipeline
 
 import json
 import os
@@ -12,8 +12,8 @@ app = Flask(__name__)
 def home():
     result = None
     message = None
-    preview = None
-    execution_result = None
+    # preview = None
+    # execution_result = None
 
     if request.method == "POST":
         try:
@@ -33,50 +33,58 @@ def home():
 
             elif len(pipeline) == 0:
                 message = "No valid operations found!"
-
+                
             else:
-                # Execute pipeline
-                execution_result = execute_pipeline(
-                    pipeline
+                result = json.dumps(
+                    pipeline,
+                    indent=4
                 )
 
-                if (
-                    execution_result
-                    and
-                    execution_result.get("type")
-                    == "error"
-                ):
-                    message = execution_result.get(
-                        "message",
-                        "Execution failed"
-                    )
+                message = "JSON Generated Successfully"
 
-                else:
-                    preview = None
+            # else:
+                # # Execute pipeline
+                # execution_result = execute_pipeline(
+                #     pipeline
+                # )
 
-            if execution_result:
+                # if (
+                #     execution_result
+                #     and
+                #     execution_result.get("type")
+                #     == "error"
+                # ):
+                #     message = execution_result.get(
+                #         "message",
+                #         "Execution failed"
+                #     )
 
-                preview = execution_result.get(
-                    "data",
-                    None
-                )
+            #     else:
+            #         preview = None
 
-            result = json.dumps(
-                pipeline,
-                indent=4
-            )
+            # if execution_result:
 
-            if preview:
+            #     preview = execution_result.get(
+            #         "data",
+            #         None
+            #     )
 
-                message = (
-                    "Pipeline Executed Successfully"
-                )
+            # result = json.dumps(
+            #     pipeline,
+            #     indent=4
+            # )
 
-            else:
+            # if preview:
 
-                message = (
-                    "JSON Generated Successfully"
-                )
+            #     message = (
+            #         "Pipeline Executed Successfully"
+            #     )
+
+            # else:
+
+            #     message = (
+            #         "JSON Generated Successfully"
+            #     )
 
         except Exception as e:
             message = str(e)
@@ -85,7 +93,7 @@ def home():
         "index.html",
         result=result,
         message=message,
-        preview=preview
+        # preview=preview
     )
 
 # ==========================================

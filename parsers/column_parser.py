@@ -324,17 +324,14 @@ def parse_column(prompt):
     # FILL MISSING VALUES
     # ==========================
 
-    fill_match = re.search(
-        r"replace\s+missing\s+(\w+)(?:\s+values?)?\s+with\s+(.+?)(?=\s+(?:keep|select|retain|sort|save|export|write|store|download|$)|,)",
-        prompt,
-        re.I
-    )
-
-    if fill_match:
+    for fill_match in re.finditer(
+         r"replace\s+missing\s+(\w+)(?:\s+values?)?\s+with\s+(.+?)(?=\s+(?:replace|keep|select|rename|sort|save|export|write|finally|$))",
+         prompt,
+         re.I
+    ):
 
         value = fill_match.group(2).strip()
 
-        # Convert numeric values
         if value.isdigit():
             value = int(value)
 
@@ -344,13 +341,17 @@ def parse_column(prompt):
         pipeline.append({
 
             "id": generate_id(),
+
             "operation": "fill_missing",
+
             "input": current_table,
+
             "output": current_table,
-            "column": fill_match.group(1),
+
+            "column": fill_match.group(1).lower(),
+
             "value": value
 
         })
-
 
     return pipeline

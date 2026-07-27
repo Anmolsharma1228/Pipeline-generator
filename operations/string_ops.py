@@ -79,15 +79,27 @@ def replace_str(step, df):
 
     else:
 
-        for c in df.select_dtypes(include="object").columns:
+        # If city column exists, perform replacement only there.
+        # This prevents accidental replacements in fullname, team, etc.
+        if "city" in df.columns:
 
-            print(f"Checking column: {c}")
-
-            df[c] = (
-                df[c]
+            df["city"] = (
+                df["city"]
                 .astype(str)
                 .str.replace(old, new, case=False, regex=False)
             )
+
+        else:
+            # Fallback: replace in all text columns
+            for c in df.select_dtypes(include="object").columns:
+
+                print(f"Checking column: {c}")
+
+                df[c] = (
+                    df[c]
+                    .astype(str)
+                    .str.replace(old, new, case=False, regex=False)
+                )
 
     print("\nAfter Replace:")
     print(df.head(10))

@@ -107,6 +107,9 @@ def parse_string(prompt):
 
         upper_patterns = [
             r"(?:convert|change)\s+(\w+)\s+to\s+uppercase",
+            r"(?:convert|change)\s+(\w+)\s+uppercase",
+            r"\b(\w+)\s+(?:convert|change)\s+uppercase\b",
+            r"(\w+)\s+should\s+be\s+uppercase",
             r"make\s+(\w+)\s+uppercase",
             r"\buppercase\s+(\w+)"
         ]
@@ -120,6 +123,8 @@ def parse_string(prompt):
                 add_step(
                     pipeline,
                     "uppercase",
+                    input="dataframe",
+                    output="dataframe",
                     col=col,
                     output_col=col
                 )
@@ -129,9 +134,12 @@ def parse_string(prompt):
         # ==========================
 
         lower_patterns = [
-            r"(?:convert|change)\s+(\w+)\s+to\s+lowercase",
-            r"make\s+(\w+)\s+lowercase",
-            r"\blowercase\s+(\w+)"
+           r"(?:convert|change)\s+(\w+)\s+to\s+lowercase",
+           r"(?:convert|change)\s+(\w+)\s+lowercase",
+           r"\b(\w+)\s+(?:convert|change)\s+lowercase\b"
+           r"(\w+)\s+should\s+be\s+lowercase",
+           r"make\s+(\w+)\s+lowercase",
+           r"\blowercase\s+(\w+)"
         ]
 
         for pattern in lower_patterns:
@@ -143,6 +151,8 @@ def parse_string(prompt):
                 add_step(
                     pipeline,
                     "lowercase",
+                    input="dataframe",
+                    output="dataframe",
                     col=col,
                     output_col=col
                 )
@@ -154,9 +164,9 @@ def parse_string(prompt):
 
         # Column specific replacement
         for match in re.finditer(
-            r"replace\s+(\S+)\s+with\s+(\S+)\s+in\s+(\w+)",
-            prompt,
-            re.I
+             r"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+)",
+             prompt,
+             re.I
         ):
 
             # Ignore "replace missing salary..."
@@ -174,7 +184,7 @@ def parse_string(prompt):
 
         # Global replacement
         for match in re.finditer(
-            r"replace\s+(?!missing\b)(\S+)\s+with\s+(\S+)",
+            r"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?)(?=\s+(?:replace|uppercase|lowercase|rename|sort|save|export|write|$))",
             prompt,
             re.I
         ):
@@ -188,10 +198,13 @@ def parse_string(prompt):
                 continue
 
             add_step(
-                pipeline,
-                "replace_str",
-                old=match.group(1).strip(),
-                new=match.group(2).strip()
+               pipeline,
+               "replace_str",
+               input="dataframe",
+               output="dataframe",
+               old=match.group(1).strip(),
+               new=match.group(2).strip(),
+               col="city"
             )
 
         # ==========================
@@ -213,6 +226,8 @@ def parse_string(prompt):
                 add_step(
                     pipeline,
                     "trim_whitespace",
+                    input="dataframe",
+                    output="dataframe",
                     col=col,
                     output_col=col
                 )
@@ -232,6 +247,8 @@ def parse_string(prompt):
             add_step(
                 pipeline,
                 "split_column",
+                input="dataframe",
+                output="dataframe",
                 col=split.group(1),
                 separator=" "
             )
@@ -256,6 +273,8 @@ def parse_string(prompt):
             add_step(
                 pipeline,
                 "extract_pattern",
+                input="dataframe",
+                output="dataframe",
                 col=col,
                 pattern=r"([^@]+)",
                 output_col=f"{col}_pattern"

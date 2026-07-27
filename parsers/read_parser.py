@@ -72,6 +72,9 @@ def parse_read(prompt):
                 .replace(" ", "")
                 .title()
             )
+        else:
+         # Default sheet if user doesn't mention one
+         read_op["sheet_name"] = "Sheet1"
 
         # ==========================
         # ROW PREVIEW

@@ -58,30 +58,30 @@ def reorder_pipeline(pipeline):
         # FILTER
         "filter_rows": 10,
 
-        # RENAME
-        "rename_columns": 15,
+        # SELECT FIRST
+        "select_columns": 15,
+
+        # THEN RENAME
+        "rename_columns": 20,
 
         # STRING
-        "uppercase": 20,
-        "lowercase": 21,
-        "replace_str": 22,
-        "trim_whitespace": 23,
-        "split_column": 24,
-        "extract_pattern": 25,
+        "uppercase": 25,
+        "lowercase": 26,
+        "replace_str": 27,
+        "trim_whitespace": 28,
+        "split_column": 29,
+        "extract_pattern": 30,
 
         # MATH
-        "add_constant": 30,
-        "subtract_constant": 31,
-        "multiply_columns": 32,
-        "divide_columns": 33,
+        "add_constant": 35,
+        "subtract_constant": 36,
+        "multiply_columns": 37,
+        "divide_columns": 38,
 
         # COLUMN
         "combine_columns": 40,
         "add_column": 41,
-
-        # SELECT / DROP
-        "select_columns": 50,
-        "drop_columns": 51,
+        "drop_columns": 42,
 
         # SORT
         "sort_values": 60,
@@ -106,8 +106,7 @@ def reorder_pipeline(pipeline):
         # EXPORT
         "write_csv": 100,
         "to_json": 101,
-        "to_html": 102,
-        "write_sql":103
+        "to_html": 102
     }
 
     return sorted(

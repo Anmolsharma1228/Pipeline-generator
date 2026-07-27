@@ -62,10 +62,21 @@ def write_csv(step, df):
         step["path"]
     )
 
+    # Clean column names
+    df.columns = df.columns.astype(str).str.strip()
+
+    # Clean whitespace from string columns
+    for col in df.select_dtypes(include="object").columns:
+        df[col] = df[col].str.strip()
+
     df.to_csv(
         path,
         index=False
     )
+
+    print(f"write_csv -> {path}")
+
+    return df
 
 
 def to_json(step, df):

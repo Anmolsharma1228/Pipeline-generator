@@ -1,26 +1,17 @@
 [
     {
-        "id": 178488814656039,
+        "id": 178547911666389,
         "operation": "read_excel_any",
         "output": "dataframe",
         "path": "empdata1.xlsx",
-        "sheet_name": "Sheet1"
+        "sheet_name": "Sheet1",
+        "rows": 10,
+        "preview": true
     },
     {
-        "id": 178488814656526,
-        "operation": "select_columns",
-        "input": "dataframe",
-        "output": "dataframe",
-        "cols": [
-            "fullname",
-            "email",
-            "city"
-        ]
-    },
-    {
-        "id": 178488814658238,
+        "id": 178547911672493,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "der.csv"
+        "path": "test.csv"
     }
 ]

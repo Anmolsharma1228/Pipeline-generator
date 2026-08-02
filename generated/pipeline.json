@@ -1,17 +1,53 @@
 [
     {
-        "id": 178547911666389,
+        "id": 178565446199689,
         "operation": "read_excel_any",
         "output": "dataframe",
-        "path": "empdata1.xlsx",
-        "sheet_name": "Sheet1",
-        "rows": 10,
-        "preview": true
+        "path": "library.xlsx",
+        "sheet_name": "Sheet1"
     },
     {
-        "id": 178547911672493,
+        "id": 178565446199729,
+        "operation": "drop_duplicates",
+        "input": "dataframe",
+        "output": "dataframe",
+        "subset": [
+            "book_id"
+        ]
+    },
+    {
+        "id": 178565446199731,
+        "operation": "fill_missing",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "fine",
+        "value": 0
+    },
+    {
+        "id": 178565446199789,
+        "operation": "rename_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "mapping": {
+            "member_name": "borrower"
+        }
+    },
+    {
+        "id": 178565446199760,
+        "operation": "select_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "cols": [
+            "book_name",
+            "borrower",
+            "book_id",
+            "fine"
+        ]
+    },
+    {
+        "id": 178565446199879,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "test.csv"
+        "path": "library_report.csv"
     }
 ]

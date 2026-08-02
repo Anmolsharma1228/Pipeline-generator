@@ -399,14 +399,14 @@ def parse_column(prompt):
         # DROP DUPLICATES
         #=========================
     duplicate_match = re.search(
-        r"(?:remove|drop)\s+duplicate(?:s)?(?:\s+rows)?(?:\s+based\s+on)?\s+(\w+)",
-        prompt,
-        re.I
+       r"(?:remove|drop)\s+duplicate(?:s)?(?:\s+rows)?(?:\s+based\s+on|using)?\s+(.+?)(?=\s+(?:then|after|if|replace|fill|keep|select|rename|sort|save|export|write|finally|$))",
+       prompt,
+    re.I
     )
 
     if duplicate_match:
 
-        column = duplicate_match.group(1).lower()
+        column = normalize_col(duplicate_match.group(1))
 
         mapping = {
             "cities": "city",
@@ -435,35 +435,43 @@ def parse_column(prompt):
     # FILL MISSING VALUES
     # ==========================
 
-    for fill_match in re.finditer(
-         r"replace\s+missing\s+(\w+)(?:\s+values?)?\s+with\s+(.+?)(?=\s+(?:replace|keep|select|rename|sort|save|export|write|finally|$))",
-         prompt,
-         re.I
-    ):
+    fill_patterns = [
 
-        value = fill_match.group(2).strip()
+        # replace missing salary with 0
+       r"replace\s+missing\s+(.+?)(?:\s+values?)?\s+with\s+([^\s]+)",
 
-        if value.isdigit():
-            value = int(value)
+        # salary blank put 0
+       r"(.+?)\s+blank\s+put\s+([^\s]+)",
 
-        elif re.fullmatch(r"\d+\.\d+", value):
-            value = float(value)
+        # salary blank replace with 0
+        r"(.+?)\s+blank\s+replace\s+with\s+([^\s]+)",
 
-        pipeline.append({
+        # fill missing salary with 0
+        r"fill\s+missing\s+(.+?)\s+with\s+([^\s]+)"
+    ]
 
-            "id": generate_id(),
+    for pattern in fill_patterns:
 
-            "operation": "fill_missing",
+        for fill_match in re.finditer(pattern, prompt, re.I):
 
-            "input": current_table,
+            value = fill_match.group(2).strip()
 
-            "output": current_table,
+            if value.isdigit():
+                value = int(value)
 
-            "column": fill_match.group(1).lower(),
+            elif re.fullmatch(r"\d+\.\d+", value):
+                value = float(value)
 
-            "value": value
+            pipeline.append({
 
-        })
+                "id": generate_id(),
+                "operation": "fill_missing",
+                "input": current_table,
+                "output": current_table,
+                "column": normalize_col(fill_match.group(1)),
+                "value": value
+
+            })
 
     return pipeline
 
@@ -900,39 +908,63 @@ def find_match(prompt, patterns):
 
 def normalize_col(col):
 
+    if not col:
+        return ""
+
+    # Normalize text
+    col = (
+        col.strip()
+           .lower()
+           .replace("-", " ")
+    )
+
     COLUMN_MAP = {
 
-   
-    "employee":"fullname",
-    "employees":"fullname",
+        "employee": "fullname",
+        "employees": "fullname",
 
-    "name":"fullname",
-    "names":"fullname",
+        "name": "fullname",
+        "names": "fullname",
 
-    "full name":"fullname",
-    "employee name":"fullname",
+        "full name": "fullname",
+        "employee name": "fullname",
 
-    "city":"city",
-    "cities":"city",
+        "city": "city",
+        "cities": "city",
 
-    "mail":"email",
-    "mails":"email",
+        "mail": "email",
+        "mails": "email",
 
-    "email":"email",
-    "emails":"email",
+        "email": "email",
+        "emails": "email",
 
-    "dept":"department",
-    "team":"department",
-    "department":"department",
+        "dept": "department",
+        "team": "department",
+        "department": "department",
 
-    "salary":"salary"
+        "salary": "salary",
 
-}
+        # NEW
+        "order id": "order_id",
+        "orderid": "order_id",
 
-    return COLUMN_MAP.get(
-        col.strip(),
-        col.strip()
-    )
+        "customer id": "customer_id",
+
+        "total amount": "total_amount",
+        "amount": "amount",
+
+        "joining date": "joining_date",
+
+        "phone number": "phone_number"
+
+    }
+
+    # Return mapped value if available
+    if col in COLUMN_MAP:
+        return COLUMN_MAP[col]
+
+    # Otherwise normalize spaces to underscores
+    return col.replace(" ", "_")
 
 def parse_columns(text):
     """
@@ -1004,7 +1036,7 @@ def parse_string(prompt):
         lower_patterns = [
            r"(?:convert|change)\s+(\w+)\s+to\s+lowercase",
            r"(?:convert|change)\s+(\w+)\s+lowercase",
-           r"\b(\w+)\s+(?:convert|change)\s+lowercase\b"
+           r"\b(\w+)\s+(?:convert|change)\s+lowercase\b",
            r"(\w+)\s+should\s+be\s+lowercase",
            r"make\s+(\w+)\s+lowercase",
            r"\blowercase\s+(\w+)"
@@ -1030,51 +1062,79 @@ def parse_string(prompt):
         # REPLACE
         # ==========================
 
+        # Try to infer the last referenced string column
+                replace_pos = match.start()
+
+        text_before_replace = prompt[:replace_pos]
+
+        last_string_col = None
+
+        patterns = [
+            r"(?:convert|change|make)\s+(\w+)\s+(?:to\s+)?uppercase",
+            r"(?:convert|change|make)\s+(\w+)\s+(?:to\s+)?lowercase",
+            r"trim\s+whitespace(?:\s+from)?\s+(\w+)",
+            r"split\s+(\w+)",
+            r"extract\s+\w+\s+from\s+(\w+)"
+        ]
+
+        for pattern in patterns:
+            for m in re.finditer(pattern, text_before_replace, re.I):
+                last_string_col = normalize_col(m.group(1))
+
+        # --------------------------
         # Column specific replacement
+        # Example:
+        # replace Delhi with Mumbai in city
+        # --------------------------
         for match in re.finditer(
-             r"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+)",
-             prompt,
-             re.I
+            r"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+)(?=\s+(?:replace|uppercase|lowercase|rename|sort|trim|split|extract|save|export|write|$))",
+            prompt,
+            re.I
         ):
 
-            # Ignore "replace missing salary..."
             if match.group(1).lower() == "missing":
                 continue
 
             add_step(
                 pipeline,
                 "replace_str",
+                input="dataframe",
+                output="dataframe",
                 old=match.group(1).strip(),
                 new=match.group(2).strip(),
                 col=normalize_col(match.group(3))
             )
-
-
+            
+        # --------------------------
         # Global replacement
+        # --------------------------
         for match in re.finditer(
-            r"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?)(?=\s+(?:replace|uppercase|lowercase|rename|sort|save|export|write|$))",
+            r"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?)(?=\s+(?:replace|uppercase|lowercase|rename|sort|trim|split|extract|save|export|write|$))",
             prompt,
             re.I
         ):
 
-            # Skip if already parsed as column replacement
+            # Skip if already handled as:
+            # replace X with Y in column
             if re.search(
-                rf"replace\s+{re.escape(match.group(1))}\s+with\s+{re.escape(match.group(2))}\s+in\s+\w+",
+                rf"replace\s+{re.escape(match.group(1).strip())}\s+with\s+{re.escape(match.group(2).strip())}\s+in\s+\w+",
                 prompt,
                 re.I
             ):
                 continue
 
-            add_step(
-               pipeline,
-               "replace_str",
-               input="dataframe",
-               output="dataframe",
-               old=match.group(1).strip(),
-               new=match.group(2).strip(),
-               col="city"
-            )
+            step = {
+                "input": "dataframe",
+                "output": "dataframe",
+                "old": match.group(1).strip(),
+                "new": match.group(2).strip()
+            }
 
+            add_step(
+                pipeline,
+                "replace_str",
+                **step
+            )
         # ==========================
         # TRIM
         # ==========================
@@ -1783,10 +1843,7 @@ def reorder_pipeline(pipeline):
         # FILTER
         "filter_rows": 10,
 
-        # SELECT FIRST
-        "select_columns": 15,
-
-        # THEN RENAME
+        # RENAME
         "rename_columns": 20,
 
         # STRING
@@ -1807,6 +1864,7 @@ def reorder_pipeline(pipeline):
         "combine_columns": 40,
         "add_column": 41,
         "drop_columns": 42,
+        "select_columns": 43,
 
         # SORT
         "sort_values": 60,

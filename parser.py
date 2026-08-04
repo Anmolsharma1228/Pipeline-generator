@@ -1,5 +1,15 @@
 import json
-from llm.llm_parser import normalize_prompt
+import os
+
+# Works whether llm_parser.py lives in a llm/ subfolder (original
+# project layout) or flat next to this file (e.g. after uploading
+# individual files somewhere new) - tries the package form first.
+try:
+    from llm.llm_parser import normalize_prompt
+except ModuleNotFoundError:
+    from llm.llm_parser import normalize_prompt
+
+from column_resolver import remap_pipeline_columns, _OP_COLUMN_SPEC
 
 import re
 import time
@@ -17,43 +27,57 @@ def parse_read(prompt):
 
     pipeline = []
     current_table = "dataframe"
-    number_words = {
 
+    number_words = {
+        "zero": 0,
         "one": 1,
         "two": 2,
         "three": 3,
+        "four": 4,
         "five": 5,
         "ten": 10,
         "twenty": 20,
         "fifty": 50
-
     }
 
     read_match = re.search(
-        r"([\w\-.]+\.(csv|xlsx|json))",
+        r"(?:read|open|load|import)\s+([\w\-.]+)(?:\.(csv|xlsx|json)|\s+(csv|excel|xlsx|json))",
         prompt,
         re.I
     )
 
     if read_match:
 
+        filename = read_match.group(1)
+
+        # Extension can come from either:
+        # Read employee.xlsx
+        # or
+        # Read employee excel
+        ext = read_match.group(2) or read_match.group(3)
+
+        ext = ext.lower()
+
+        if ext == "excel":
+            ext = "xlsx"
+
+        # If user wrote "Read employee excel"
+        if "." not in filename:
+            filename = f"{filename}.{ext}"
+
         read_op = {
 
             "id": generate_id(),
 
             "operation": {
-
                 "csv": "read_csv",
                 "xlsx": "read_excel_any",
                 "json": "read_json"
-
-            }[
-                read_match.group(2)
-            ],
+            }[ext],
 
             "output": current_table,
 
-            "path": read_match.group(1)
+            "path": filename
 
         }
 
@@ -75,9 +99,10 @@ def parse_read(prompt):
                 .replace(" ", "")
                 .title()
             )
+
         else:
-         # Default sheet if user doesn't mention one
-         read_op["sheet_name"] = "Sheet1"
+
+            read_op["sheet_name"] = "Sheet1"
 
         # ==========================
         # ROW PREVIEW
@@ -99,14 +124,16 @@ def parse_read(prompt):
 
             elif value.lower() in number_words:
 
-                read_op["rows"] = number_words[
-                    value.lower()
-                ]
+                read_op["rows"] = number_words[value.lower()]
 
             read_op["preview"] = True
 
-        pipeline.append(
-            read_op
+        # Add step with prompt position
+        add_step(
+            pipeline,
+            read_op["operation"],
+            position=read_match.start(),
+            **{k: v for k, v in read_op.items() if k != "operation"}
         )
 
     return pipeline
@@ -145,21 +172,15 @@ def parse_column(prompt):
 
             value=add_match.group(2)
 
-        pipeline.append({
-
-            "id":generate_id(),
-
-            "operation":"add_column",
-
-            "input":current_table,
-
-            "output":current_table,
-
-            "column":add_match.group(1),
-
-            "value":value
-
-        })
+        add_step(
+         pipeline,
+         "add_column",
+         position=add_match.start(),
+         input=current_table,
+         output=current_table,
+         column=add_match.group(1),
+         value=value
+         )
 
 
     # ==========================
@@ -177,23 +198,16 @@ def parse_column(prompt):
         old = rename_match.group(1).lower()
         new = rename_match.group(2).lower()
 
-        pipeline.append({
-            "id": generate_id(),
-            "operation": "rename_columns",
-            "input": current_table,
-            "output": current_table,
-            "mapping": {
-                old: new
-            }
-        })
+        add_step(
+         pipeline,
+         "rename_columns",
+         position=rename_match.start(),
+         input=current_table,
+         output=current_table,
+         mapping={
+         old: new
+         })
 
-        # Replace old column name in remaining prompt
-        prompt = re.sub(
-            rf"\b{re.escape(old)}\b",
-            new,
-            prompt,
-            flags=re.I
-        )
 
 
     # ==========================
@@ -211,16 +225,17 @@ def parse_column(prompt):
         column = sort_match.group(1)
         order = sort_match.group(2) or "ascending"
         ascending = order.lower() in ["ascending", "asc"]
-        pipeline.append({
 
-            "id": generate_id(),
-            "operation": "sort_values",
-            "input": current_table,
-            "output": current_table,
-            "by": column,
-            "ascending": ascending
+        add_step(
+            pipeline,
+            "sort_values",
+            position=sort_match.start(),
+            input=current_table,
+            output=current_table,
+            by=column,
+            ascending=ascending
+            )
 
-        })
 
 
     # ==========================
@@ -235,30 +250,26 @@ def parse_column(prompt):
 
     if drop_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "drop_columns",
-
-            "input": current_table,
-
-            "output": current_table,
-
-            "cols": [
-
-                drop_match.group(1)
-
-            ]
-
-        })
+       add_step(
+        pipeline,
+        "drop_columns",
+        position=drop_match.start(),
+        input=current_table,
+        output=current_table,
+        cols=[drop_match.group(1)]
+        )
 
     # ==========================
     # SELECT COLUMNS
     # ==========================
 
     select_match = re.search(
-        r"(?:keep\s+only|need\s+only|only\s+need|select|retain|include\s+only|show\s+only)\s+(.+?)(?=\s+(?:rename|convert|change|uppercase|lowercase|replace|trim|split|extract|sort|filter|drop|save|export|write|store|finally)\b|$)",
+        r"(?:keep\s+only|keep\s+just|just\s+keep|need\s+only|only\s+need|"
+        r"i\s+just\s+need|just\s+need|"
+        r"select|retain|include\s+only|show\s+only|display\s+only|"
+        r"i\s+want\s+only|only\s+give(?:\s+me)?|give\s+only|"
+        r"(?:just\s+)?(?:give|gimme)(?:\s+me)?(?:\s+only)?)\s+(.+?)"
+        r"(?=\s+(?:rename|convert|change|uppercase|lowercase|replace|trim|split|extract|sort|filter|drop|save|export|write|store|finally|then|also|and\s+then|now|date\s+difference|extract\s+date|add\s+\d+\s+days?|subtract\s+\d+\s+days?|format\s+date)\b|$)",
         prompt,
         re.I
     )
@@ -320,23 +331,7 @@ def parse_column(prompt):
             cols_text
         )
 
-        mapping = {
-            "name": "fullname",
-            "names": "fullname",
-            "employee": "fullname",
-            "employees": "fullname",
-            "employee name": "fullname",
-            "full name": "fullname",
-            "fullname": "fullname",
-            "city": "city",
-            "cities": "city",
-            "email": "email",
-            "emails": "email",
-            "department": "department",
-            "dept": "department",
-            "salary": "salary",
-            "bonus": "bonus"
-        }
+        mapping = {}
 
         cols = []
 
@@ -349,23 +344,38 @@ def parse_column(prompt):
 
             col = re.sub(r"\d+", "", col).strip()
 
-            # Keep only the first word if extra words remain
-            col = col.split()[0]
+            if not col:
+                continue
 
-            col = mapping.get(col, col)
+            # If more than one space-separated word remains, it's
+            # usually several column names typed without a comma or
+            # "and" between them (e.g. "fullname diagnosis and X").
+            # Treat each word as its own candidate column instead of
+            # merging them into one bogus name or dropping any of them.
+            _STOPWORDS = {
+                "then", "also", "now", "get", "and",
+                "the", "a", "an", "please", "next"
+            }
 
-            if col not in cols:
-                cols.append(col)
+            for word in col.split():
+
+                word = normalize_col(word)
+
+                if word and word not in _STOPWORDS and word not in cols:
+                    cols.append(word)
 
         if cols:
 
-            pipeline.append({
-                "id": generate_id(),
-                "operation": "select_columns",
-                "input": current_table,
-                "output": current_table,
-                "cols": cols
-            })
+            add_step(
+             pipeline,
+             "select_columns",
+             position=select_match.start(),
+             input=current_table,
+             output=current_table,
+             cols=cols
+             )
+            
+
 
     # ==========================
     # COMBINE COLUMNS
@@ -378,20 +388,18 @@ def parse_column(prompt):
 
     if combine_match:
 
-        pipeline.append({
-            "id": generate_id(),
-            "operation": "combine_columns",
-            "input": "dataframe",
-            "output": "dataframe",
-
-            "columns": [
-                combine_match.group(1),
-                combine_match.group(2)
-            ],
-
-            "new_column":
-            f"{combine_match.group(1)}_{combine_match.group(2)}"
-        })
+        add_step(
+         pipeline,
+         "combine_columns",
+         position=combine_match.start(),
+         input="dataframe",
+         output="dataframe",
+         columns=[
+             combine_match.group(1),
+             combine_match.group(2)
+         ],
+         new_column=f"{combine_match.group(1)}_{combine_match.group(2)}"
+         )
 
     
 
@@ -408,28 +416,16 @@ def parse_column(prompt):
 
         column = normalize_col(duplicate_match.group(1))
 
-        mapping = {
-            "cities": "city",
-            "city": "city",
-            "departments": "department",
-            "department": "department",
-            "emails": "email",
-            "email": "email",
-            "names": "fullname",
-            "name": "fullname"
-        }
+        add_step(
+         pipeline,
+         "drop_duplicates",
+         position=duplicate_match.start(),
+         input=current_table,
+         output=current_table,
+         subset=[column]
+         )
 
-        column = mapping.get(column, column)
 
-        pipeline.append({
-
-            "id": generate_id(),
-            "operation": "drop_duplicates",
-            "input": current_table,
-            "output": current_table,
-            "subset": [column]
-
-        })
 
     # ==========================
     # FILL MISSING VALUES
@@ -462,176 +458,24 @@ def parse_column(prompt):
             elif re.fullmatch(r"\d+\.\d+", value):
                 value = float(value)
 
-            pipeline.append({
-
-                "id": generate_id(),
-                "operation": "fill_missing",
-                "input": current_table,
-                "output": current_table,
-                "column": normalize_col(fill_match.group(1)),
-                "value": value
-
-            })
-
-    return pipeline
-
-
-
-def parse_date(prompt):
-
-    pipeline = []
-    
-    # extract date parts
-    extract_match = re.search(
-        r"extract\s+date\s+parts\s+from\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if extract_match:
-
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
-            "extract_date_parts",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            extract_match.group(1)
-        })
-
-     # add days
-    add_match = re.search(
-        r"add\s+(\d+)\s+days?\s+to\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if add_match:
-
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
-            "add_days",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            add_match.group(2),
-
-            "days":
-            int(add_match.group(1))
-        })
-
-    # subtract days
-    subtract_match = re.search(
-        r"subtract\s+(\d+)\s+days?\s+from\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if subtract_match:
-
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
-            "subtract_days",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            subtract_match.group(2),
-
-            "days":
-            int(
-                subtract_match.group(1)
-            )
-        })
-
-   # format date
-    format_match = re.search(
-        r"format\s+date\s+column",
-        prompt,
-        re.I
-    )
-
-    if format_match:
-
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
-            "format_date",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            "joining_date"
-        })
-
-
- # date difference
-    diff_match = re.search(
-        r"date\s+difference\s+between\s+(\w+)\s+and\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if diff_match:
-
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
-            "date_diff",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "start_col":
-            diff_match.group(1),
-
-            "end_col":
-            diff_match.group(2),
-
-            "result":
-            "days_difference"
-        })    
+            add_step(
+                pipeline,
+                "fill_missing",
+                position=fill_match.start(),
+                input=current_table,
+                output=current_table,
+                column=normalize_col(fill_match.group(1)),
+                value=value
+                )
 
     return pipeline
+
 
 
 def parse_math(prompt):
 
-    pipeline=[]
+    pipeline = []
+    current_table = "dataframe"
 
     multiply_match = re.search(
         r"multiply\s+(\w+)\s+(?:and|by)\s+(\w+)",
@@ -656,19 +500,16 @@ def parse_math(prompt):
 
             result = result_match.group(1)
 
-        pipeline.append({
-
-            "id":generate_id(),
-
-            "operation":"multiply_columns",
-
-            "col1":col1,
-
-            "col2":col2,
-
-            "result":result
-
-        })
+        add_step(
+            pipeline,
+            "multiply_columns",
+            position=multiply_match.start(),
+            input=current_table,
+            output=current_table,
+            col1=col1,
+            col2=col2,
+            result=result
+        )
 
     add_match = re.search(
         r"add\s+(\d+)\s+to\s+(\w+)",
@@ -678,19 +519,15 @@ def parse_math(prompt):
 
     if add_match:
 
-        pipeline.append({
-
-            "id":generate_id(),
-
-            "operation":"add_constant",
-
-            "col":add_match.group(2),
-
-            "value":int(
-                add_match.group(1)
-            )
-
-        })
+        add_step(
+            pipeline,
+            "add_constant",
+            position=add_match.start(),
+            input=current_table,
+            output=current_table,
+            col=add_match.group(2),
+            value=int(add_match.group(1))
+        )
 
     # ==========================
     # SUBTRACT CONSTANT
@@ -704,20 +541,15 @@ def parse_math(prompt):
 
     if subtract_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "subtract_constant",
-
-            "col": subtract_match.group(2),
-
-            "value": int(
-                subtract_match.group(1)
-            )
-
-        })
-
+        add_step(
+            pipeline,
+            "subtract_constant",
+            position=subtract_match.start(),
+            input=current_table,
+            output=current_table,
+            col=subtract_match.group(2),
+            value=int(subtract_match.group(1))
+        )
 
     # ==========================
     # DIVIDE COLUMNS
@@ -731,24 +563,20 @@ def parse_math(prompt):
 
     if divide_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "divide_columns",
-
-            "col1": divide_match.group(1),
-
-            "col2": divide_match.group(2),
-
-            "result": (
+        add_step(
+            pipeline,
+            "divide_columns",
+            position=divide_match.start(),
+            input=current_table,
+            output=current_table,
+            col1=divide_match.group(1),
+            col2=divide_match.group(2),
+            result=(
                 f"{divide_match.group(1)}"
                 "_per_"
                 f"{divide_match.group(2)}"
             )
-
-        })
-
+        )
 
     # ==========================
     # SUM
@@ -762,18 +590,15 @@ def parse_math(prompt):
 
     if sum_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "aggregate",
-
-            "column": sum_match.group(1),
-
-            "agg": "sum"
-
-        })
-
+        add_step(
+            pipeline,
+            "aggregate",
+            position=sum_match.start(),
+            input=current_table,
+            output=current_table,
+            column=sum_match.group(1),
+            agg="sum"
+        )
 
     # ==========================
     # AVG
@@ -787,18 +612,15 @@ def parse_math(prompt):
 
     if avg_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "aggregate",
-
-            "column": avg_match.group(1),
-
-            "agg": "mean"
-
-        })
-
+        add_step(
+            pipeline,
+            "aggregate",
+            position=avg_match.start(),
+            input=current_table,
+            output=current_table,
+            column=avg_match.group(1),
+            agg="mean"
+        )
 
     # ==========================
     # MAX
@@ -812,21 +634,20 @@ def parse_math(prompt):
 
     if max_match:
 
-        pipeline.append({
+        add_step(
+            pipeline,
+            "aggregate",
+            position=max_match.start(),
+            input=current_table,
+            output=current_table,
+            column=max_match.group(1),
+            agg="max"
+        )
 
-            "id": generate_id(),
+    # ==========================
+    # GROUP AGGREGATE
+    # ==========================
 
-            "operation": "aggregate",
-
-            "column": max_match.group(1),
-
-            "agg": "max"
-
-        })
-
-        # ==========================
-        # GROUP AGGREGATE
-        # ==========================
     aggregate_match = re.search(
         r"(aggregate|sum|total|average|mean|max|min)\s+(\w+)\s+by\s+(\w+)",
         prompt,
@@ -853,36 +674,30 @@ def parse_math(prompt):
 
         }
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "aggregate",
-
-            "input": "dataframe",
-
-            "output": "dataframe",
-
-            "column":
-            aggregate_match.group(2),
-
-            "groupby":
-            aggregate_match.group(3),
-
-            "agg":
-            agg_map[operation]
-
-        })
-
+        add_step(
+            pipeline,
+            "aggregate",
+            position=aggregate_match.start(),
+            input=current_table,
+            output=current_table,
+            column=aggregate_match.group(2),
+            groupby=aggregate_match.group(3),
+            agg=agg_map[operation]
+        )
 
     return pipeline
 
 
-def add_step(pipeline, operation, **kwargs):
+def add_step(pipeline, operation, position=None, **kwargs):
+    """
+    Add a pipeline step and remember where it appeared
+    in the user's prompt.
+    """
 
     step = {
         "id": generate_id(),
-        "operation": operation
+        "operation": operation,
+        "__pos": position if position is not None else 999999
     }
 
     step.update(kwargs)
@@ -908,63 +723,10 @@ def find_match(prompt, patterns):
 
 def normalize_col(col):
 
-    if not col:
-        return ""
+    col = col.strip().lower()
+    col = re.sub(r"\s+", "_", col)
 
-    # Normalize text
-    col = (
-        col.strip()
-           .lower()
-           .replace("-", " ")
-    )
-
-    COLUMN_MAP = {
-
-        "employee": "fullname",
-        "employees": "fullname",
-
-        "name": "fullname",
-        "names": "fullname",
-
-        "full name": "fullname",
-        "employee name": "fullname",
-
-        "city": "city",
-        "cities": "city",
-
-        "mail": "email",
-        "mails": "email",
-
-        "email": "email",
-        "emails": "email",
-
-        "dept": "department",
-        "team": "department",
-        "department": "department",
-
-        "salary": "salary",
-
-        # NEW
-        "order id": "order_id",
-        "orderid": "order_id",
-
-        "customer id": "customer_id",
-
-        "total amount": "total_amount",
-        "amount": "amount",
-
-        "joining date": "joining_date",
-
-        "phone number": "phone_number"
-
-    }
-
-    # Return mapped value if available
-    if col in COLUMN_MAP:
-        return COLUMN_MAP[col]
-
-    # Otherwise normalize spaces to underscores
-    return col.replace(" ", "_")
+    return col
 
 def parse_columns(text):
     """
@@ -996,8 +758,14 @@ def parse_string(prompt):
     if not isinstance(prompt, str):
         return pipeline
     
-    
     prompt = prompt.lower().strip()
+
+    NEXT_OP = (
+            r"(?=\s+(?:"
+            r"replace|uppercase|lowercase|rename|sort|trim|split|extract|"
+            r"save|export|write|filter|keep|select|drop|"
+            r"subtract|add|multiply|divide|compute|date|finally|$))"
+        )
 
     try:
 
@@ -1006,12 +774,12 @@ def parse_string(prompt):
         # ==========================
 
         upper_patterns = [
-            r"(?:convert|change)\s+(\w+)\s+to\s+uppercase",
-            r"(?:convert|change)\s+(\w+)\s+uppercase",
-            r"\b(\w+)\s+(?:convert|change)\s+uppercase\b",
-            r"(\w+)\s+should\s+be\s+uppercase",
-            r"make\s+(\w+)\s+uppercase",
-            r"\buppercase\s+(\w+)"
+          r"(?:convert|change)\s+(.+?)\s+to\s+uppercase",
+          r"(?:convert|change)\s+(.+?)\s+uppercase",
+          r"\b(.+?)\s+(?:convert|change)\s+uppercase\b",
+          r"(.+?)\s+should\s+be\s+uppercase",
+          r"make\s+(.+?)\s+uppercase",
+          r"\buppercase\s+(.+?)(?=\s+(?:lowercase|replace|rename|sort|trim|split|extract|save|export|write|$))"
         ]
 
         for pattern in upper_patterns:
@@ -1023,11 +791,14 @@ def parse_string(prompt):
                 add_step(
                     pipeline,
                     "uppercase",
+                    position=match.start(),
                     input="dataframe",
                     output="dataframe",
                     col=col,
                     output_col=col
-                )
+                    )
+
+
 
         # ==========================
         # LOWERCASE
@@ -1049,37 +820,19 @@ def parse_string(prompt):
                 col = normalize_col(match.group(1))
 
                 add_step(
-                    pipeline,
-                    "lowercase",
-                    input="dataframe",
-                    output="dataframe",
-                    col=col,
-                    output_col=col
-                )
-                  
-                  
+                  pipeline,
+                  "lowercase",
+                  position=match.start(),
+                  input="dataframe",
+                  output="dataframe",
+                  col=col,
+                  output_col=col
+                  )
+
+
         # ==========================
         # REPLACE
         # ==========================
-
-        # Try to infer the last referenced string column
-                replace_pos = match.start()
-
-        text_before_replace = prompt[:replace_pos]
-
-        last_string_col = None
-
-        patterns = [
-            r"(?:convert|change|make)\s+(\w+)\s+(?:to\s+)?uppercase",
-            r"(?:convert|change|make)\s+(\w+)\s+(?:to\s+)?lowercase",
-            r"trim\s+whitespace(?:\s+from)?\s+(\w+)",
-            r"split\s+(\w+)",
-            r"extract\s+\w+\s+from\s+(\w+)"
-        ]
-
-        for pattern in patterns:
-            for m in re.finditer(pattern, text_before_replace, re.I):
-                last_string_col = normalize_col(m.group(1))
 
         # --------------------------
         # Column specific replacement
@@ -1087,7 +840,7 @@ def parse_string(prompt):
         # replace Delhi with Mumbai in city
         # --------------------------
         for match in re.finditer(
-            r"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+)(?=\s+(?:replace|uppercase|lowercase|rename|sort|trim|split|extract|save|export|write|$))",
+            rf"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+){NEXT_OP}",
             prompt,
             re.I
         ):
@@ -1098,43 +851,47 @@ def parse_string(prompt):
             add_step(
                 pipeline,
                 "replace_str",
+                position=match.start(),
                 input="dataframe",
                 output="dataframe",
                 old=match.group(1).strip(),
                 new=match.group(2).strip(),
                 col=normalize_col(match.group(3))
-            )
+                )
+
             
         # --------------------------
         # Global replacement
         # --------------------------
         for match in re.finditer(
-            r"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?)(?=\s+(?:replace|uppercase|lowercase|rename|sort|trim|split|extract|save|export|write|$))",
-            prompt,
-            re.I
+           rf"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?){NEXT_OP}",
+           prompt,
+           re.I
         ):
 
-            # Skip if already handled as:
-            # replace X with Y in column
-            if re.search(
-                rf"replace\s+{re.escape(match.group(1).strip())}\s+with\s+{re.escape(match.group(2).strip())}\s+in\s+\w+",
-                prompt,
-                re.I
-            ):
+            old_value = match.group(1).strip()
+            new_value = match.group(2).strip()
+
+            # Skip if this is actually a column-specific replace
+            # Example: replace mumbai with bombay in city
+            if re.search(r"\bin\s+\w+$", new_value, re.I):
                 continue
 
             step = {
                 "input": "dataframe",
                 "output": "dataframe",
-                "old": match.group(1).strip(),
-                "new": match.group(2).strip()
+                "old": old_value,
+                "new": new_value
             }
 
             add_step(
                 pipeline,
                 "replace_str",
+                position=match.start(),
                 **step
             )
+
+
         # ==========================
         # TRIM
         # ==========================
@@ -1152,13 +909,14 @@ def parse_string(prompt):
             if col:
 
                 add_step(
-                    pipeline,
-                    "trim_whitespace",
-                    input="dataframe",
-                    output="dataframe",
-                    col=col,
-                    output_col=col
-                )
+                 pipeline,
+                 "trim_whitespace",
+                 position=trim.start(),
+                 input="dataframe",
+                 output="dataframe",
+                 col=col,
+                 output_col=col
+                 )
 
         # ==========================
         # SPLIT
@@ -1172,14 +930,16 @@ def parse_string(prompt):
 
         if split:
 
-            add_step(
-                pipeline,
-                "split_column",
-                input="dataframe",
-                output="dataframe",
-                col=split.group(1),
-                separator=" "
+          add_step(
+           pipeline,
+           "split_column",
+           position=split.start(),
+           input="dataframe",
+           output="dataframe",
+           col=split.group(1),
+           separator=" "
             )
+
 
         # ==========================
         # EXTRACT
@@ -1199,14 +959,15 @@ def parse_string(prompt):
             col = extract.group(1)
 
             add_step(
-                pipeline,
-                "extract_pattern",
-                input="dataframe",
-                output="dataframe",
-                col=col,
-                pattern=r"([^@]+)",
-                output_col=f"{col}_pattern"
-            )
+              pipeline,
+              "extract_pattern",
+              position=extract.start(),
+              input="dataframe",
+              output="dataframe",
+              col=col,
+              pattern=r"([^@]+)",
+              output_col=f"{col}_pattern"
+               )
 
     except Exception as e:
 
@@ -1271,23 +1032,16 @@ def parse_filter(prompt):
 
             operator = operator_map.get(operator, operator)
 
-            pipeline.append({
-
-                "id": generate_id(),
-
-                "operation": "filter_rows",
-
-                "input": "dataframe",
-
-                "output": "dataframe",
-
-                "column": column,
-
-                "operator": operator,
-
-                "value": value
-
-            })
+            add_step(
+                pipeline,
+                "filter_rows",
+                position=match.start(),
+                input="dataframe",
+                output="dataframe",
+                column=column,
+                operator=operator,
+                value=value
+            )
 
             break
 
@@ -1298,6 +1052,7 @@ def parse_filter(prompt):
 def parse_export(prompt):
 
     pipeline=[]
+    current_table = "dataframe"
 
     export_match = re.search(
         r"(?:save|export)?\s*([\w\-]+\.csv)",
@@ -1311,17 +1066,13 @@ def parse_export(prompt):
 
         if not filename.lower().endswith(".xlsx"):
 
-            pipeline.append({
-
-                "id": generate_id(),
-
-                "operation": "write_csv",
-
-                "input": "dataframe",
-
-                "path": filename
-
-            })
+                add_step(
+                    pipeline,
+                    "write_csv",
+                    position=export_match.start(),
+                    input=current_table,
+                    path=filename
+                    )
 
  # JSON
     json_match = re.search(
@@ -1332,16 +1083,13 @@ def parse_export(prompt):
 
     if json_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "to_json",
-
-            "input": "dataframe",
-
-            "path": "output.json"
-        })
+        add_step(
+            pipeline,
+            "to_json",
+            position=json_match.start(),
+            input="dataframe",
+            path="output.json"
+        )
 
     # HTML
     html_match = re.search(
@@ -1352,17 +1100,13 @@ def parse_export(prompt):
 
     if html_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "to_html",
-
-            "input": "dataframe",
-
-            "path": "output.html"
-        })
-
+        add_step(
+            pipeline,
+            "to_html",
+            position=html_match.start(),
+            input="dataframe",
+            path="output.html"
+        )
 
 
     return pipeline
@@ -1380,12 +1124,13 @@ def parse_transform(prompt):
 
     if match:
 
-        pipeline.append({
-            "id": generate_id(),
-            "operation": "transpose",
-            "input": "dataframe",
-            "output": "dataframe"
-        })
+        add_step(
+            pipeline,
+            "transpose",
+            position=match.start(),
+            input="dataframe",
+            output="dataframe"
+        )
 
     return pipeline
 
@@ -1402,16 +1147,13 @@ def parse_reindex(prompt):
 
     if match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "reindex_columns",
-
-            "input": "dataframe",
-
-            "output": "dataframe"
-        })
+        add_step(
+            pipeline,
+            "reindex_columns",
+            position=match.start(),
+            input="dataframe",
+            output="dataframe"
+        )
 
     return pipeline
 
@@ -1437,27 +1179,14 @@ def parse_drop_rows(prompt):
             range_match.group(2)
         )
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "drop_rows_by_index",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "rows":
-            list(
-                range(
-                    start,
-                    end + 1
-                )
-            )
-        })
+            position=range_match.start(),
+            input="dataframe",
+            output="dataframe",
+            rows=list(range(start, end + 1))
+        )
 
         return pipeline
 
@@ -1482,22 +1211,14 @@ def parse_drop_rows(prompt):
 
         ]
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "drop_rows_by_index",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "rows":
-            rows
-        })
+            position=single_match.start(),
+            input="dataframe",
+            output="dataframe",
+            rows=rows
+        )
 
     return pipeline
 
@@ -1514,20 +1235,14 @@ def parse_use_row_as_header(prompt):
 
     if match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation": "use_row_as_header",
-
-            "input": "dataframe",
-
-            "output": "dataframe",
-
-            "row": int(
-                match.group(1)
-            )
-        })
+        add_step(
+            pipeline,
+            "use_row_as_header",
+            position=match.start(),
+            input="dataframe",
+            output="dataframe",
+            row=int(match.group(1))
+        )
 
     return pipeline
 
@@ -1537,29 +1252,43 @@ def parse_pivot(prompt):
     pipeline=[]
 
     match = re.search(
-        r"pivot\s+table\s+by\s+(\w+)",
+        r"pivot\s+table\s+by\s+(\w+)"
+        r"(?:\s+values?\s+(\w+))?"
+        r"(?:\s+(?:aggfunc|using|agg)\s+(\w+))?",
         prompt,
         re.I
     )
 
     if match:
 
-        pipeline.append({
+        index_col = match.group(1)
 
-            "id": generate_id(),
+        # values column: use whatever the user named; if they didn't
+        # name one, fall back to the index column itself rather than
+        # guessing an unrelated business field.
+        values_col = match.group(2) or index_col
 
-            "operation": "pivot_table",
+        agg_map = {
+            "sum": "sum", "total": "sum",
+            "average": "mean", "mean": "mean",
+            "max": "max", "min": "min", "count": "count"
+        }
 
-            "input": "dataframe",
+        aggfunc = agg_map.get(
+            (match.group(3) or "sum").lower(),
+            "sum"
+        )
 
-            "output": "dataframe",
-
-            "index": match.group(1),
-
-            "values": "salary",
-
-            "aggfunc": "sum"
-        })
+        add_step(
+            pipeline,
+            "pivot_table",
+            position=match.start(),
+            input="dataframe",
+            output="dataframe",
+            index=index_col,
+            values=values_col,
+            aggfunc=aggfunc
+        )
 
     return pipeline
 
@@ -1568,8 +1297,11 @@ def parse_pivot(prompt):
 def parse_date(prompt):
 
     pipeline = []
-    
-    # extract date parts
+    current_table = "dataframe"
+
+    # -----------------------------
+    # Extract date parts
+    # -----------------------------
     extract_match = re.search(
         r"extract\s+date\s+parts\s+from\s+(\w+)",
         prompt,
@@ -1578,24 +1310,18 @@ def parse_date(prompt):
 
     if extract_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "extract_date_parts",
+            position=extract_match.start(),
+            input=current_table,
+            output=current_table,
+            column=extract_match.group(1)
+        )
 
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            extract_match.group(1)
-        })
-
-     # add days
+    # -----------------------------
+    # Add days
+    # -----------------------------
     add_match = re.search(
         r"add\s+(\d+)\s+days?\s+to\s+(\w+)",
         prompt,
@@ -1604,27 +1330,19 @@ def parse_date(prompt):
 
     if add_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "add_days",
+            position=add_match.start(),
+            input=current_table,
+            output=current_table,
+            column=add_match.group(2),
+            days=int(add_match.group(1))
+        )
 
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            add_match.group(2),
-
-            "days":
-            int(add_match.group(1))
-        })
-
-    # subtract days
+    # -----------------------------
+    # Subtract days
+    # -----------------------------
     subtract_match = re.search(
         r"subtract\s+(\d+)\s+days?\s+from\s+(\w+)",
         prompt,
@@ -1633,86 +1351,80 @@ def parse_date(prompt):
 
     if subtract_match:
 
-        pipeline.append({
-
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "subtract_days",
+            position=subtract_match.start(),
+            input=current_table,
+            output=current_table,
+            column=subtract_match.group(2),
+            days=int(subtract_match.group(1))
+        )
 
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            subtract_match.group(2),
-
-            "days":
-            int(
-                subtract_match.group(1)
-            )
-        })
-
-   # format date
+    # -----------------------------
+    # Format date
+    # -----------------------------
     format_match = re.search(
-        r"format\s+date\s+column",
+        r"format\s+(?:date\s+column\s+(\w+)|(\w+)\s+as\s+date|(\w+)\s+date\s+column)",
         prompt,
         re.I
     )
 
     if format_match:
 
-        pipeline.append({
+        date_col = (
+            format_match.group(1)
+            or format_match.group(2)
+            or format_match.group(3)
+        )
 
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "format_date",
+            position=format_match.start(),
+            input=current_table,
+            output=current_table,
+            column=date_col
+        )
 
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "column":
-            "joining_date"
-        })
-
-
- # date difference
+    # -----------------------------
+    # Date Difference
+    # Supports:
+    # date difference between start and end
+    # date difference between start and end as delivery_days
+    # date difference between start and end into delivery_days
+    # date difference between start and end called delivery_days
+    # -----------------------------
     diff_match = re.search(
-        r"date\s+difference\s+between\s+(\w+)\s+and\s+(\w+)",
+        r"""
+        date\s+difference\s+between\s+
+        (\w+)\s+
+        and\s+
+        (\w+)
+        (?:\s+
+            (?:as|into|called|named)
+            \s+
+            (\w+)
+        )?
+        """,
         prompt,
-        re.I
+        re.I | re.X
     )
 
     if diff_match:
 
-        pipeline.append({
+        result_col = diff_match.group(3) or "days_difference"
 
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "date_diff",
-
-            "input":
-            "dataframe",
-
-            "output":
-            "dataframe",
-
-            "start_col":
-            diff_match.group(1),
-
-            "end_col":
-            diff_match.group(2),
-
-            "result":
-            "days_difference"
-        })    
+            position=diff_match.start(),
+            input=current_table,
+            output=current_table,
+            start_col=diff_match.group(1),
+            end_col=diff_match.group(2),
+            result=result_col
+        )
 
     return pipeline
 
@@ -1722,34 +1434,37 @@ def parse_sql(prompt):
     pipeline = []
 
     match = re.search(
-        r"write\s+to\s+sql",
+        r"write\s+to\s+sql(?:\s+table\s+(\w+))?",
         prompt,
         re.I
     )
 
     if match:
 
-        pipeline.append({
+        table = match.group(1)
 
-            "id": generate_id(),
+        if not table:
+            # No table name given - fall back to the source
+            # filename (e.g. "sales.xlsx" -> "sales") rather than
+            # guessing an unrelated business table name.
+            file_match = re.search(
+                r"([\w\-]+)\.(csv|xlsx|json)",
+                prompt,
+                re.I
+            )
+            table = file_match.group(1) if file_match else "output_table"
 
-            "operation":
+        add_step(
+            pipeline,
             "write_sql",
+            position=match.start(),
+            input="dataframe",
+            connection="sqlite:///database.db",
+            table=table,
+            output="dataframe"
+        )
 
-            "input":
-            "dataframe",
-
-            "connection":
-            "sqlite:///database.db",
-
-            "table":
-            "employees",
-
-            "output":
-            "dataframe"
-        })
-
-    return pipeline   # ← MOVE OUTSIDE if
+    return pipeline
 
 
 
@@ -1758,26 +1473,22 @@ def parse_read_database(prompt):
     pipeline = []
 
     match = re.search(
-        r"read\s+database",
+        r"read\s+database(?:\s+table\s+(\w+))?",
         prompt,
         re.I
     )
 
     if match:
 
-        pipeline.append({
+        table = match.group(1) or "source_table"
 
-            "id": generate_id(),
-
-            "operation":
+        add_step(
+            pipeline,
             "read_database",
-
-            "output":
-            "dataframe",
-
-            "table":
-            "employees"
-        })
+            position=match.start(),
+            output="dataframe",
+            table=table
+        )
 
     return pipeline
 
@@ -1841,7 +1552,7 @@ def reorder_pipeline(pipeline):
         "fill_missing": 6,
 
         # FILTER
-        "filter_rows": 10,
+        "filter_rows": 48,
 
         # RENAME
         "rename_columns": 20,
@@ -1860,14 +1571,26 @@ def reorder_pipeline(pipeline):
         "multiply_columns": 37,
         "divide_columns": 38,
 
-        # COLUMN
-        "combine_columns": 40,
-        "add_column": 41,
-        "drop_columns": 42,
-        "select_columns": 43,
+        # DATE - must run BEFORE select_columns/drop_columns, since
+        # these read source columns (e.g. admitdate, dischargedate)
+        # that the user's final column selection may not keep.
+        "extract_date_parts": 39,
+        "add_days": 40,
+        "subtract_days": 41,
+        "format_date": 42,
+        "date_diff": 43,
+
+        # COLUMN - runs AFTER all derived-value computations above,
+        # so it's safe to narrow down to just the requested output
+        # columns without breaking a later step that needed the
+        # original source columns.
+        "combine_columns": 44,
+        "add_column": 45,
+        "drop_columns": 46,
+        "select_columns": 50,
 
         # SORT
-        "sort_values": 60,
+        "sort_values": 49,
 
         # OTHER
         "transpose": 80,
@@ -1875,13 +1598,6 @@ def reorder_pipeline(pipeline):
         "reindex_columns": 82,
         "use_row_as_header": 83,
         "drop_rows_by_index": 84,
-
-        # DATE
-        "extract_date_parts": 90,
-        "add_days": 91,
-        "subtract_days": 92,
-        "format_date": 93,
-        "date_diff": 94,
 
         # DATABASE
         "write_sql": 98,
@@ -1900,6 +1616,110 @@ def reorder_pipeline(pipeline):
         )
     )
 
+
+
+def _step_requires_and_produces(step):
+    """
+    Return (requires, produces) sets of column names for a step,
+    reusing the same operation spec used for column resolution
+    (_OP_COLUMN_SPEC) so this logic never drifts out of sync with it.
+    """
+
+    op = step.get("operation")
+    requires = set()
+    produces = set()
+
+    if op == "rename_columns" and "mapping" in step:
+        for old, new in step["mapping"].items():
+            if isinstance(old, str):
+                requires.add(old)
+            if isinstance(new, str):
+                produces.add(new)
+        return requires, produces
+
+    spec = _OP_COLUMN_SPEC.get(op)
+
+    if not spec:
+        return requires, produces
+
+    for key in spec.get("resolve", []):
+        val = step.get(key)
+        if isinstance(val, str):
+            requires.add(val)
+
+    for key in spec.get("resolve_list", []):
+        val = step.get(key)
+        if isinstance(val, list):
+            requires.update(v for v in val if isinstance(v, str))
+
+    for key in spec.get("define", []):
+        val = step.get(key)
+        if isinstance(val, str):
+            produces.add(val)
+
+    return requires, produces
+
+
+def enforce_dependency_order(pipeline):
+    """
+    Move any step that depends on a column created later.
+    Export operations are always kept at the end.
+    """
+
+    EXPORT_OPS = {
+        "write_csv",
+        "write_sql",
+        "to_json",
+        "to_html"
+    }
+
+    changed = True
+
+    while changed:
+
+        changed = False
+
+        for i in range(len(pipeline)):
+
+            step = pipeline[i]
+
+            requires, _ = _step_requires_and_produces(step)
+
+            if not requires:
+                continue
+
+            producer = None
+
+            for j in range(i + 1, len(pipeline)):
+
+                _, produces = _step_requires_and_produces(pipeline[j])
+
+                if requires.intersection(produces):
+                    producer = j
+
+            if producer is not None:
+
+                item = pipeline.pop(i)
+
+                if producer > i:
+                    producer -= 1
+
+                pipeline.insert(producer + 1, item)
+
+                changed = True
+                break
+
+    exports = [
+        s for s in pipeline
+        if s.get("operation") in EXPORT_OPS
+    ]
+
+    others = [
+        s for s in pipeline
+        if s.get("operation") not in EXPORT_OPS
+    ]
+
+    return others + exports
 
 
 def build_regex_pipeline(prompt):
@@ -1924,7 +1744,7 @@ def build_regex_pipeline(prompt):
     return pipeline
 
 
-def generate_pipeline(prompt):
+def generate_pipeline(prompt, file_path=None):
 
     print("=" * 60)
     print("Original Prompt")
@@ -1950,10 +1770,19 @@ def generate_pipeline(prompt):
     # Remove duplicate steps
     pipeline = remove_duplicate_steps(pipeline)
 
-    # Reorder steps
+    pipeline.sort(key=lambda step: step.get("__pos", 999999))
     pipeline = reorder_pipeline(pipeline)
+    pipeline = enforce_dependency_order(pipeline)
 
-    
+    for step in pipeline:
+        step.pop("__pos", None)
+
+    # Resolve/correct column references against the REAL uploaded
+    # file's headers, whatever the schema is. If no file is
+    # available or reading fails, this is a safe no-op - it never
+    # raises, so the user never sees an error from this step.
+    if file_path:
+        pipeline = remap_pipeline_columns(pipeline, file_path)
 
     print("=" * 60)
     print("Pipeline")
@@ -1968,6 +1797,8 @@ def generate_pipeline(prompt):
             },
             indent=4
         )
+
+    os.makedirs("generated", exist_ok=True)
 
     with open(
         "generated/pipeline.json",

@@ -1,53 +1,101 @@
 [
     {
-        "id": 178565446199689,
+        "id": 178583090655697,
         "operation": "read_excel_any",
         "output": "dataframe",
-        "path": "library.xlsx",
+        "path": "training_data.xlsx",
         "sheet_name": "Sheet1"
     },
     {
-        "id": 178565446199729,
-        "operation": "drop_duplicates",
+        "id": 178583090659176,
+        "operation": "lowercase",
         "input": "dataframe",
         "output": "dataframe",
-        "subset": [
-            "book_id"
-        ]
+        "col": "department",
+        "output_col": "department"
     },
     {
-        "id": 178565446199731,
-        "operation": "fill_missing",
+        "id": 178583090659313,
+        "operation": "replace_str",
         "input": "dataframe",
         "output": "dataframe",
-        "column": "fine",
-        "value": 0
+        "old": "hr",
+        "new": "people ops",
+        "col": "department"
     },
     {
-        "id": 178565446199789,
-        "operation": "rename_columns",
+        "id": 178583090659925,
+        "operation": "trim_whitespace",
         "input": "dataframe",
         "output": "dataframe",
-        "mapping": {
-            "member_name": "borrower"
-        }
+        "col": "empname",
+        "output_col": "empname"
     },
     {
-        "id": 178565446199760,
+        "id": 178583090657562,
+        "operation": "subtract_constant",
+        "input": "dataframe",
+        "output": "dataframe",
+        "col": "score",
+        "value": 5
+    },
+    {
+        "id": 178583090660766,
+        "operation": "extract_date_parts",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "completedon"
+    },
+    {
+        "id": 178583090660778,
+        "operation": "add_days",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "enrolledon",
+        "days": 10
+    },
+    {
+        "id": 178583090661041,
+        "operation": "date_diff",
+        "input": "dataframe",
+        "output": "dataframe",
+        "start_col": "enrolledon",
+        "end_col": "completedon",
+        "result": "days_difference"
+    },
+    {
+        "id": 178583090660425,
+        "operation": "filter_rows",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "score",
+        "operator": ">",
+        "value": 60
+    },
+    {
+        "id": 178583090655935,
+        "operation": "sort_values",
+        "input": "dataframe",
+        "output": "dataframe",
+        "by": "score",
+        "ascending": false
+    },
+    {
+        "id": 178583090656984,
         "operation": "select_columns",
         "input": "dataframe",
         "output": "dataframe",
         "cols": [
-            "book_name",
-            "borrower",
-            "book_id",
-            "fine"
+            "empname",
+            "coursetitle",
+            "score",
+            "days_to_complete"
         ]
     },
     {
-        "id": 178565446199879,
+        "id": 178583090661318,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "library_report.csv"
+        "path": "passed_training.csv"
     }
 ]

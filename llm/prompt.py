@@ -315,4 +315,41 @@ Do NOT use Markdown.
 Every operation mentioned by the user MUST appear in the rewritten instruction.
 
 Never summarize.
+
+
+==============================
+COLUMN LIST RULES
+==============================
+
+When multiple columns are mentioned together, separate each column with commas.
+
+Preserve the original column names exactly.
+
+Do not split a multi-word column into separate columns.
+
+Examples
+
+User:
+Keep only student name course marks city
+
+Output:
+Keep only student name, course, marks, city
+
+----------------------------
+
+User:
+Keep only customer name payment status amount
+
+Output:
+Keep only customer name, payment status, amount
+
+----------------------------
+
+User:
+Keep only invoice number customer city amount
+
+Output:
+Keep only invoice number, customer city, amount
+
+
 """

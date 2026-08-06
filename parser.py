@@ -1,5 +1,8 @@
 import json
 import os
+import re
+import time
+import random
 
 # Works whether llm_parser.py lives in a llm/ subfolder (original
 # project layout) or flat next to this file (e.g. after uploading
@@ -11,9 +14,129 @@ except ModuleNotFoundError:
 
 from column_resolver import remap_pipeline_columns, _OP_COLUMN_SPEC
 
-import re
-import time
-import random
+
+# ============================================================
+# DYNAMIC CONFIG
+#
+# Everything an operation needs to be recognised - its trigger
+# regex(es), how to turn a match into pipeline-step fields, and
+# the "boundary" keywords that mark where the next operation in
+# the sentence starts - lives in the tables below instead of
+# being hand-rolled inside each parse_* function. To add or tweak
+# an operation you edit a table here, not hunt through hundreds
+# of lines of near-identical regex blocks.
+#
+# The dataframe/table name is resolved once per prompt (instead
+# of being hardcoded as the literal "dataframe" in ~15 different
+# places) and threaded through every parser, so a prompt like
+# "read sales.csv into dataframe named sales_df" produces steps
+# that all reference sales_df, not a hardcoded default.
+# ============================================================
+
+DEFAULT_TABLE = "dataframe"
+
+NUMBER_WORDS = {
+    "zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+    "five": 5, "ten": 10, "twenty": 20, "fifty": 50,
+}
+
+# extension -> pipeline operation, for reading a source file.
+READ_EXTENSION_OPS = {
+    "csv": "read_csv",
+    "xls": "read_excel_any",
+    "xlsx": "read_excel_any",
+    "json": "read_json",
+}
+
+# extension -> pipeline operation, for exporting the result.
+EXPORT_EXTENSION_OPS = {
+    "csv": "write_csv",
+    "xls": "write_excel",
+    "xlsx": "write_excel",
+    "json": "to_json",
+    "html": "to_html",
+}
+
+# word used in a prompt -> pandas aggregation function name.
+AGG_WORD_MAP = {
+    "aggregate": "sum", "sum": "sum", "total": "sum",
+    "average": "mean", "mean": "mean",
+    "max": "max", "min": "min", "count": "count",
+}
+
+# comparison phrase used in a prompt -> pandas/py operator.
+FILTER_OPERATOR_MAP = {
+    "greater than": ">", "more than": ">", "above": ">",
+    "over": ">", "exceeds": ">",
+    "less than": "<", "below": "<", "under": "<",
+    "=": "==",
+}
+
+
+def make_boundary(alternatives, spacer=r"\s+"):
+    """
+    Build a lookahead boundary regex from a *list* of trigger
+    keywords/fragments instead of a hand-typed alternation string.
+    Editing what counts as "the next operation has started" for a
+    family of operations means editing a list below, not a regex
+    literal buried inside a function.
+    """
+    return rf"(?={spacer}(?:{'|'.join(alternatives)}))"
+
+
+def make_boundary_wb(alternatives):
+    """
+    Variant boundary used by patterns that want a word-boundary
+    before the keyword OR a bare end-of-string (no trailing
+    whitespace required), e.g. "...only city, department" at the
+    very end of a prompt.
+    """
+    return rf"(?=\s+(?:{'|'.join(alternatives)})\b|$)"
+
+
+# Keyword sets used to build the lookahead boundaries below. Each
+# list is the *only* thing that needs to change to teach a family
+# of operations about a new trigger word.
+BOUNDARY_KEYWORDS = {
+    "default": [
+        "save", "write", "export", "sort", "filter", "keep", "select",
+        "drop", "rename", "replace", "uppercase", "lowercase", "trim",
+        "split", "extract", "compute", "date", "finally", "then",
+        "also", "now", "add", "subtract", "multiply", "divide",
+        "where", "$",
+    ],
+    "math": [
+        "column", "columns", "sheet", "rows?", "records?", "save",
+        "write", "export", "sort", "filter", "keep", "select", "drop",
+        "rename", "replace", "uppercase", "lowercase", "trim", "split",
+        "extract", "compute", "date", "then", "also", "finally",
+        "where", "whose", "with", r"and\s+save", "$",
+    ],
+    "string": [
+        "replace", "uppercase", "lowercase", "rename", "sort", "trim",
+        "split", "extract", "save", "export", "write", "filter",
+        "keep", "select", "drop", "subtract", "add", "multiply",
+        "divide", "compute", "date", "finally", "$",
+    ],
+    "select": [
+        "rename", "convert", "change", "uppercase", "lowercase",
+        "replace", "trim", "split", "extract", "sort", "filter",
+        "drop", "save", "export", "write", "store", "finally",
+        "then", "also", r"and\s+then", "now", r"date\s+difference",
+        r"extract\s+date", r"add\s+\d+\s+days?",
+        r"subtract\s+\d+\s+days?", r"format\s+date",
+    ],
+    "duplicates": [
+        "then", "after", "if", "replace", "fill", "keep", "select",
+        "rename", "sort", "save", "export", "write", "finally", "$",
+    ],
+}
+
+NEXT_OP_DEFAULT = make_boundary(BOUNDARY_KEYWORDS["default"])
+NEXT_OP_MATH = make_boundary(BOUNDARY_KEYWORDS["math"], spacer=r"\s*")
+NEXT_OP_STRING = make_boundary(BOUNDARY_KEYWORDS["string"])
+NEXT_OP_SELECT = make_boundary_wb(BOUNDARY_KEYWORDS["select"])
+NEXT_OP_DUPLICATES = make_boundary(BOUNDARY_KEYWORDS["duplicates"])
 
 
 def generate_id():
@@ -21,671 +144,6 @@ def generate_id():
     return int(
         f"{int(time.time()*1000)}{random.randint(10,99)}"
     )
-
-
-def parse_read(prompt):
-
-    pipeline = []
-    current_table = "dataframe"
-
-    number_words = {
-        "zero": 0,
-        "one": 1,
-        "two": 2,
-        "three": 3,
-        "four": 4,
-        "five": 5,
-        "ten": 10,
-        "twenty": 20,
-        "fifty": 50
-    }
-
-    read_match = re.search(
-        r"(?:read|open|load|import)\s+([\w\-.]+)(?:\.(csv|xlsx|json)|\s+(csv|excel|xlsx|json))",
-        prompt,
-        re.I
-    )
-
-    if read_match:
-
-        filename = read_match.group(1)
-
-        # Extension can come from either:
-        # Read employee.xlsx
-        # or
-        # Read employee excel
-        ext = read_match.group(2) or read_match.group(3)
-
-        ext = ext.lower()
-
-        if ext == "excel":
-            ext = "xlsx"
-
-        # If user wrote "Read employee excel"
-        if "." not in filename:
-            filename = f"{filename}.{ext}"
-
-        read_op = {
-
-            "id": generate_id(),
-
-            "operation": {
-                "csv": "read_csv",
-                "xlsx": "read_excel_any",
-                "json": "read_json"
-            }[ext],
-
-            "output": current_table,
-
-            "path": filename
-
-        }
-
-        # ==========================
-        # SHEET SUPPORT
-        # ==========================
-
-        sheet_match = re.search(
-            r"(?:from\s+)?(sheet\s*\d+)",
-            prompt,
-            re.I
-        )
-
-        if sheet_match:
-
-            read_op["sheet_name"] = (
-                sheet_match
-                .group(1)
-                .replace(" ", "")
-                .title()
-            )
-
-        else:
-
-            read_op["sheet_name"] = "Sheet1"
-
-        # ==========================
-        # ROW PREVIEW
-        # ==========================
-
-        rows_match = re.search(
-            r"(?:first|top)\s+(\w+)\s+(?:rows|records)",
-            prompt,
-            re.I
-        )
-
-        if rows_match:
-
-            value = rows_match.group(1)
-
-            if value.isdigit():
-
-                read_op["rows"] = int(value)
-
-            elif value.lower() in number_words:
-
-                read_op["rows"] = number_words[value.lower()]
-
-            read_op["preview"] = True
-
-        # Add step with prompt position
-        add_step(
-            pipeline,
-            read_op["operation"],
-            position=read_match.start(),
-            **{k: v for k, v in read_op.items() if k != "operation"}
-        )
-
-    return pipeline
-
-
-
-def parse_column(prompt):
-
-    pipeline=[]
-
-    current_table="dataframe"
-
-    # Skip if math operation
-    if re.search(
-        r"multiply|divide|percent",
-        prompt,
-        re.I
-    ):
-        return []
-
-    # ==========================
-    # ADD COLUMN
-    # ==========================
-
-    add_match = re.search(
-        r"(?:add|create)\s+(?:new\s+)?column\s+(\w+)(?:\s+with\s+value\s+([^\s]+))?",
-        prompt,
-        re.I
-    )
-
-    if add_match:
-
-        value=""
-
-        if add_match.group(2):
-
-            value=add_match.group(2)
-
-        add_step(
-         pipeline,
-         "add_column",
-         position=add_match.start(),
-         input=current_table,
-         output=current_table,
-         column=add_match.group(1),
-         value=value
-         )
-
-
-    # ==========================
-    # RENAME COLUMN
-    # ==========================
-
-    rename_match = re.search(
-        r"(?:rename|change)\s+(\w+)\s+(?:to|as|into)\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if rename_match:
-
-        old = rename_match.group(1).lower()
-        new = rename_match.group(2).lower()
-
-        add_step(
-         pipeline,
-         "rename_columns",
-         position=rename_match.start(),
-         input=current_table,
-         output=current_table,
-         mapping={
-         old: new
-         })
-
-
-
-    # ==========================
-    # SORT
-    # ==========================
-
-    sort_match = re.search(
-        r"sort(?:\s+by)?\s+(\w+)(?:\s+(ascending|descending|asc|desc))?",
-        prompt,
-        re.I
-    )
-
-    if sort_match:
-
-        column = sort_match.group(1)
-        order = sort_match.group(2) or "ascending"
-        ascending = order.lower() in ["ascending", "asc"]
-
-        add_step(
-            pipeline,
-            "sort_values",
-            position=sort_match.start(),
-            input=current_table,
-            output=current_table,
-            by=column,
-            ascending=ascending
-            )
-
-
-
-    # ==========================
-    # DROP COLUMN
-    # ==========================
-
-    drop_match = re.search(
-        r"(?:remove|drop)\s+(\w+)\s+column",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if drop_match:
-
-       add_step(
-        pipeline,
-        "drop_columns",
-        position=drop_match.start(),
-        input=current_table,
-        output=current_table,
-        cols=[drop_match.group(1)]
-        )
-
-    # ==========================
-    # SELECT COLUMNS
-    # ==========================
-
-    select_match = re.search(
-        r"(?:keep\s+only|keep\s+just|just\s+keep|need\s+only|only\s+need|"
-        r"i\s+just\s+need|just\s+need|"
-        r"select|retain|include\s+only|show\s+only|display\s+only|"
-        r"i\s+want\s+only|only\s+give(?:\s+me)?|give\s+only|"
-        r"(?:just\s+)?(?:give|gimme)(?:\s+me)?(?:\s+only)?)\s+(.+?)"
-        r"(?=\s+(?:rename|convert|change|uppercase|lowercase|replace|trim|split|extract|sort|filter|drop|save|export|write|store|finally|then|also|and\s+then|now|date\s+difference|extract\s+date|add\s+\d+\s+days?|subtract\s+\d+\s+days?|format\s+date)\b|$)",
-        prompt,
-        re.I
-    )
-
-    if select_match:
-
-        cols_text = select_match.group(1).lower()
-
-        # Remove everything after sort/order if present
-        cols_text = re.sub(
-            r"\bsort\b.*",
-            "",
-            cols_text,
-            flags=re.I
-        )
-
-        cols_text = re.sub(
-            r"\border\b.*",
-            "",
-            cols_text,
-            flags=re.I
-        )
-
-        # Remove filter expressions
-        cols_text = re.sub(
-            r"\b(?:greater\s+than|more\s+than|less\s+than|above|below|over|under)\s+\d+\b",
-            "",
-            cols_text,
-            flags=re.I
-        )
-
-        cols_text = re.sub(
-            r"[><=!]=?\s*\d+",
-            "",
-            cols_text
-        )
-
-        # Remove unnecessary keywords
-        cols_text = re.sub(
-            r"\b(column|columns|whose|where|then|with|having|save|export|write|store|download|finally|records|rows|employee|employees|ascending|descending|asc|desc|by)\b",
-            "",
-            cols_text,
-            flags=re.I
-        )
-
-        cols_text = cols_text.replace(".", " ")
-        cols_text = cols_text.replace("(", " ")
-        cols_text = cols_text.replace(")", " ")
-
-        cols_text = re.sub(
-            r"\s+",
-            " ",
-            cols_text
-        ).strip()
-
-        # Split by comma or "and"
-        raw_cols = re.split(
-            r",|\band\b",
-            cols_text
-        )
-
-        mapping = {}
-
-        cols = []
-
-        for col in raw_cols:
-
-            col = col.strip()
-
-            if not col:
-                continue
-
-            col = re.sub(r"\d+", "", col).strip()
-
-            if not col:
-                continue
-
-            # If more than one space-separated word remains, it's
-            # usually several column names typed without a comma or
-            # "and" between them (e.g. "fullname diagnosis and X").
-            # Treat each word as its own candidate column instead of
-            # merging them into one bogus name or dropping any of them.
-            _STOPWORDS = {
-                "then", "also", "now", "get", "and",
-                "the", "a", "an", "please", "next"
-            }
-
-            for word in col.split():
-
-                word = normalize_col(word)
-
-                if word and word not in _STOPWORDS and word not in cols:
-                    cols.append(word)
-
-        if cols:
-
-            add_step(
-             pipeline,
-             "select_columns",
-             position=select_match.start(),
-             input=current_table,
-             output=current_table,
-             cols=cols
-             )
-            
-
-
-    # ==========================
-    # COMBINE COLUMNS
-    # ==========================
-    combine_match = re.search(
-        r"combine\s+(\w+)\s+and\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if combine_match:
-
-        add_step(
-         pipeline,
-         "combine_columns",
-         position=combine_match.start(),
-         input="dataframe",
-         output="dataframe",
-         columns=[
-             combine_match.group(1),
-             combine_match.group(2)
-         ],
-         new_column=f"{combine_match.group(1)}_{combine_match.group(2)}"
-         )
-
-    
-
-        #==========================
-        # DROP DUPLICATES
-        #=========================
-    duplicate_match = re.search(
-       r"(?:remove|drop)\s+duplicate(?:s)?(?:\s+rows)?(?:\s+based\s+on|using)?\s+(.+?)(?=\s+(?:then|after|if|replace|fill|keep|select|rename|sort|save|export|write|finally|$))",
-       prompt,
-    re.I
-    )
-
-    if duplicate_match:
-
-        column = normalize_col(duplicate_match.group(1))
-
-        add_step(
-         pipeline,
-         "drop_duplicates",
-         position=duplicate_match.start(),
-         input=current_table,
-         output=current_table,
-         subset=[column]
-         )
-
-
-
-    # ==========================
-    # FILL MISSING VALUES
-    # ==========================
-
-    fill_patterns = [
-
-        # replace missing salary with 0
-       r"replace\s+missing\s+(.+?)(?:\s+values?)?\s+with\s+([^\s]+)",
-
-        # salary blank put 0
-       r"(.+?)\s+blank\s+put\s+([^\s]+)",
-
-        # salary blank replace with 0
-        r"(.+?)\s+blank\s+replace\s+with\s+([^\s]+)",
-
-        # fill missing salary with 0
-        r"fill\s+missing\s+(.+?)\s+with\s+([^\s]+)"
-    ]
-
-    for pattern in fill_patterns:
-
-        for fill_match in re.finditer(pattern, prompt, re.I):
-
-            value = fill_match.group(2).strip()
-
-            if value.isdigit():
-                value = int(value)
-
-            elif re.fullmatch(r"\d+\.\d+", value):
-                value = float(value)
-
-            add_step(
-                pipeline,
-                "fill_missing",
-                position=fill_match.start(),
-                input=current_table,
-                output=current_table,
-                column=normalize_col(fill_match.group(1)),
-                value=value
-                )
-
-    return pipeline
-
-
-
-def parse_math(prompt):
-
-    pipeline = []
-    current_table = "dataframe"
-
-    multiply_match = re.search(
-        r"multiply\s+(\w+)\s+(?:and|by)\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if multiply_match:
-
-        col1 = multiply_match.group(1)
-        col2 = multiply_match.group(2)
-
-        result = f"{col1}_x_{col2}"
-
-        result_match = re.search(
-            r"create\s+new\s+column\s+(\w+)",
-            prompt,
-            re.I
-        )
-
-        if result_match:
-
-            result = result_match.group(1)
-
-        add_step(
-            pipeline,
-            "multiply_columns",
-            position=multiply_match.start(),
-            input=current_table,
-            output=current_table,
-            col1=col1,
-            col2=col2,
-            result=result
-        )
-
-    add_match = re.search(
-        r"add\s+(\d+)\s+to\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if add_match:
-
-        add_step(
-            pipeline,
-            "add_constant",
-            position=add_match.start(),
-            input=current_table,
-            output=current_table,
-            col=add_match.group(2),
-            value=int(add_match.group(1))
-        )
-
-    # ==========================
-    # SUBTRACT CONSTANT
-    # ==========================
-
-    subtract_match = re.search(
-        r"subtract\s+(\d+)\s+from\s+(\w+)",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if subtract_match:
-
-        add_step(
-            pipeline,
-            "subtract_constant",
-            position=subtract_match.start(),
-            input=current_table,
-            output=current_table,
-            col=subtract_match.group(2),
-            value=int(subtract_match.group(1))
-        )
-
-    # ==========================
-    # DIVIDE COLUMNS
-    # ==========================
-
-    divide_match = re.search(
-        r"divide\s+(\w+)\s+by\s+(\w+)",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if divide_match:
-
-        add_step(
-            pipeline,
-            "divide_columns",
-            position=divide_match.start(),
-            input=current_table,
-            output=current_table,
-            col1=divide_match.group(1),
-            col2=divide_match.group(2),
-            result=(
-                f"{divide_match.group(1)}"
-                "_per_"
-                f"{divide_match.group(2)}"
-            )
-        )
-
-    # ==========================
-    # SUM
-    # ==========================
-
-    sum_match = re.search(
-        r"sum\s+of\s+(\w+)",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if sum_match:
-
-        add_step(
-            pipeline,
-            "aggregate",
-            position=sum_match.start(),
-            input=current_table,
-            output=current_table,
-            column=sum_match.group(1),
-            agg="sum"
-        )
-
-    # ==========================
-    # AVG
-    # ==========================
-
-    avg_match = re.search(
-        r"(?:average|mean)\s+(?:of\s+)?(\w+)",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if avg_match:
-
-        add_step(
-            pipeline,
-            "aggregate",
-            position=avg_match.start(),
-            input=current_table,
-            output=current_table,
-            column=avg_match.group(1),
-            agg="mean"
-        )
-
-    # ==========================
-    # MAX
-    # ==========================
-
-    max_match = re.search(
-        r"max\s+(?:of\s+)?(\w+)",
-        prompt,
-        re.IGNORECASE
-    )
-
-    if max_match:
-
-        add_step(
-            pipeline,
-            "aggregate",
-            position=max_match.start(),
-            input=current_table,
-            output=current_table,
-            column=max_match.group(1),
-            agg="max"
-        )
-
-    # ==========================
-    # GROUP AGGREGATE
-    # ==========================
-
-    aggregate_match = re.search(
-        r"(aggregate|sum|total|average|mean|max|min)\s+(\w+)\s+by\s+(\w+)",
-        prompt,
-        re.I
-    )
-
-    if aggregate_match:
-
-        operation = (
-            aggregate_match
-            .group(1)
-            .lower()
-        )
-
-        agg_map = {
-
-            "aggregate": "sum",
-            "sum": "sum",
-            "total": "sum",
-            "average": "mean",
-            "mean": "mean",
-            "max": "max",
-            "min": "min"
-
-        }
-
-        add_step(
-            pipeline,
-            "aggregate",
-            position=aggregate_match.start(),
-            input=current_table,
-            output=current_table,
-            column=aggregate_match.group(2),
-            groupby=aggregate_match.group(3),
-            agg=agg_map[operation]
-        )
-
-    return pipeline
 
 
 def add_step(pipeline, operation, position=None, **kwargs):
@@ -728,6 +186,7 @@ def normalize_col(col):
 
     return col
 
+
 def parse_columns(text):
     """
     Convert:
@@ -751,747 +210,1009 @@ def parse_columns(text):
     return columns
 
 
-def parse_string(prompt):
+def resolve_table_name(prompt):
+    """
+    Figure out which dataframe/table name the pipeline should use
+    for this prompt. Falls back to DEFAULT_TABLE when the user
+    didn't name one - this is the single place that decides the
+    table name, instead of each parse_* function hardcoding
+    "dataframe" independently.
+    """
+
+    df_match = re.search(
+        r"dataframe\s+(?:named|called)\s+([A-Za-z_]\w*)",
+        prompt,
+        re.I
+    )
+
+    if df_match:
+        return df_match.group(1)
+
+    return DEFAULT_TABLE
+
+
+# ============================================================
+# GENERIC RULE ENGINE
+# ============================================================
+
+def run_pattern_rules(prompt, rules, table):
+    """
+    Generic driver for config-driven parsing. Each rule supplies
+    its own pattern(s) and a "build" callable that turns a match
+    into step kwargs (or None to skip that match). This is what
+    lets adding a new operation mean adding a table entry instead
+    of writing a new near-duplicate function.
+
+    mode:
+      "first"  - try each pattern in order, stop at the first one
+                 that matches (mirrors the original if/elif style
+                 used for mutually-exclusive phrasings).
+      "each_pattern_first" - every pattern gets its own
+                 independent first match (mirrors code that ran
+                 several unrelated standalone regexes).
+      "all"    - re.finditer over every pattern, so a prompt can
+                 trigger the same operation more than once
+                 (mirrors code that used finditer directly).
+    """
 
     pipeline = []
 
-    if not isinstance(prompt, str):
-        return pipeline
-    
-    prompt = prompt.lower().strip()
+    for rule in rules:
 
-    NEXT_OP = (
-            r"(?=\s+(?:"
-            r"replace|uppercase|lowercase|rename|sort|trim|split|extract|"
-            r"save|export|write|filter|keep|select|drop|"
-            r"subtract|add|multiply|divide|compute|date|finally|$))"
-        )
+        mode = rule.get("mode", "first")
+        flags = rule.get("flags", re.I)
+        build = rule["build"]
+        operation = rule["operation"]
 
-    try:
+        if mode == "first":
 
-        # ==========================
-        # UPPERCASE
-        # ==========================
+            for pattern in rule["patterns"]:
 
-        upper_patterns = [
-          r"(?:convert|change)\s+(.+?)\s+to\s+uppercase",
-          r"(?:convert|change)\s+(.+?)\s+uppercase",
-          r"\b(.+?)\s+(?:convert|change)\s+uppercase\b",
-          r"(.+?)\s+should\s+be\s+uppercase",
-          r"make\s+(.+?)\s+uppercase",
-          r"\buppercase\s+(.+?)(?=\s+(?:lowercase|replace|rename|sort|trim|split|extract|save|export|write|$))"
-        ]
+                match = re.search(pattern, prompt, flags)
 
-        for pattern in upper_patterns:
+                if match:
 
-            for match in re.finditer(pattern, prompt, re.I):
+                    kwargs = build(match, table, prompt)
 
-                col = normalize_col(match.group(1))
+                    if kwargs is not None:
+                        add_step(
+                            pipeline, operation,
+                            position=match.start(), **kwargs
+                        )
 
-                add_step(
-                    pipeline,
-                    "uppercase",
-                    position=match.start(),
-                    input="dataframe",
-                    output="dataframe",
-                    col=col,
-                    output_col=col
-                    )
+                    break
 
+        elif mode == "each_pattern_first":
 
+            for pattern in rule["patterns"]:
 
-        # ==========================
-        # LOWERCASE
-        # ==========================
+                match = re.search(pattern, prompt, flags)
 
-        lower_patterns = [
-           r"(?:convert|change)\s+(\w+)\s+to\s+lowercase",
-           r"(?:convert|change)\s+(\w+)\s+lowercase",
-           r"\b(\w+)\s+(?:convert|change)\s+lowercase\b",
-           r"(\w+)\s+should\s+be\s+lowercase",
-           r"make\s+(\w+)\s+lowercase",
-           r"\blowercase\s+(\w+)"
-        ]
+                if match:
 
-        for pattern in lower_patterns:
+                    kwargs = build(match, table, prompt)
 
-            for match in re.finditer(pattern, prompt, re.I):
+                    if kwargs is not None:
+                        add_step(
+                            pipeline, operation,
+                            position=match.start(), **kwargs
+                        )
 
-                col = normalize_col(match.group(1))
+        elif mode == "all":
 
-                add_step(
-                  pipeline,
-                  "lowercase",
-                  position=match.start(),
-                  input="dataframe",
-                  output="dataframe",
-                  col=col,
-                  output_col=col
-                  )
+            for pattern in rule["patterns"]:
 
+                for match in re.finditer(pattern, prompt, flags):
 
-        # ==========================
-        # REPLACE
-        # ==========================
+                    kwargs = build(match, table, prompt)
 
-        # --------------------------
-        # Column specific replacement
-        # Example:
-        # replace Delhi with Mumbai in city
-        # --------------------------
-        for match in re.finditer(
-            rf"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+){NEXT_OP}",
-            prompt,
-            re.I
-        ):
-
-            if match.group(1).lower() == "missing":
-                continue
-
-            add_step(
-                pipeline,
-                "replace_str",
-                position=match.start(),
-                input="dataframe",
-                output="dataframe",
-                old=match.group(1).strip(),
-                new=match.group(2).strip(),
-                col=normalize_col(match.group(3))
-                )
-
-            
-        # --------------------------
-        # Global replacement
-        # --------------------------
-        for match in re.finditer(
-           rf"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?){NEXT_OP}",
-           prompt,
-           re.I
-        ):
-
-            old_value = match.group(1).strip()
-            new_value = match.group(2).strip()
-
-            # Skip if this is actually a column-specific replace
-            # Example: replace mumbai with bombay in city
-            if re.search(r"\bin\s+\w+$", new_value, re.I):
-                continue
-
-            step = {
-                "input": "dataframe",
-                "output": "dataframe",
-                "old": old_value,
-                "new": new_value
-            }
-
-            add_step(
-                pipeline,
-                "replace_str",
-                position=match.start(),
-                **step
-            )
-
-
-        # ==========================
-        # TRIM
-        # ==========================
-
-        trim = re.search(
-            r"trim\s+whitespace(?:\s+from\s+(\w+))?",
-            prompt,
-            re.I
-        )
-
-        if trim:
-
-            col = trim.group(1)
-
-            if col:
-
-                add_step(
-                 pipeline,
-                 "trim_whitespace",
-                 position=trim.start(),
-                 input="dataframe",
-                 output="dataframe",
-                 col=col,
-                 output_col=col
-                 )
-
-        # ==========================
-        # SPLIT
-        # ==========================
-
-        split = re.search(
-            r"split\s+(\w+)(?=\s+(?:extract|save|export|uppercase|lowercase|replace|trim|$))",
-            prompt,
-            re.I
-        )
-
-        if split:
-
-          add_step(
-           pipeline,
-           "split_column",
-           position=split.start(),
-           input="dataframe",
-           output="dataframe",
-           col=split.group(1),
-           separator=" "
-            )
-
-
-        # ==========================
-        # EXTRACT
-        # ==========================
-
-        extract = find_match(
-            prompt,
-            [
-                r"extract\s+pattern\s+from\s+(\w+)",
-                r"extract\s+email\s+from\s+(\w+)",
-               r"extract\s+(\w+)(?=\s+(?:save|export|uppercase|lowercase|replace|split|trim|$))"
-            ]
-        )
-
-        if extract:
-
-            col = extract.group(1)
-
-            add_step(
-              pipeline,
-              "extract_pattern",
-              position=extract.start(),
-              input="dataframe",
-              output="dataframe",
-              col=col,
-              pattern=r"([^@]+)",
-              output_col=f"{col}_pattern"
-               )
-
-    except Exception as e:
-
-        print(
-            "Parser Error:",
-            str(e)
-        )
-
-        return []
+                    if kwargs is not None:
+                        add_step(
+                            pipeline, operation,
+                            position=match.start(), **kwargs
+                        )
 
     return pipeline
 
 
+# ============================================================
+# READ
+# ============================================================
 
-def parse_filter(prompt):
+READ_PRIMARY_PATTERN = (
+    r"(?:file\s+name|file\s+named|named)\s+"
+    r"([A-Za-z0-9_\-(). ]+\.(?:csv|xlsx|xls|json))"
+)
+
+READ_FALLBACK_PATTERN = r"([A-Za-z0-9_\-(). ]+\.(csv|xlsx|xls|json))"
+
+SHEET_PATTERN = (
+    r"(?:sheet|worksheet)\s+(.+?)"
+    r"(?:\s+from\b|,|\s+then\b|\s+after\b|\s+skip\b|\s+save\b|$)"
+)
+
+SKIP_ROWS_PATTERN = r"skip\s+(?:the\s+)?(?:first\s+)?(\d+)\s+rows?"
+
+PREVIEW_ROWS_PATTERN = (
+    r"(?:show|display|preview|get|read)\s+(?:first|top)\s+"
+    r"(\w+)\s+(?:rows|records)"
+)
+
+
+def parse_read(prompt, table=None):
 
     pipeline = []
+    current_table = table if table is not None else resolve_table_name(prompt)
 
-    prompt = prompt.lower()
+    # -------------------------------------------------
+    # FIND FILE
+    # -------------------------------------------------
 
-    patterns = [
+    read_match = re.search(READ_PRIMARY_PATTERN, prompt, re.I)
 
-        # Filter salary > 40000
-        r"filter\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+    # If prompt doesn't start with Read/Open...
+    if not read_match:
 
-        # where salary > 40000
-        r"where\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+        read_match = re.search(READ_FALLBACK_PATTERN, prompt, re.I)
 
-        # salary greater than 40000
-        r"(\w+)\s+(greater than|more than|above|over|exceeds)\s+(\d+)",
+        if read_match:
 
-        # salary less than 40000
-        r"(\w+)\s+(less than|below|under)\s+(\d+)"
-    ]
+            before = prompt[:read_match.start()].lower()
 
-    operator_map = {
+            if any(word in before for word in ("save", "store", "write", "export")):
+                read_match = None
 
-        "greater than": ">",
-        "more than": ">",
-        "above": ">",
-        "over": ">",
-        "exceeds": ">",
+    if not read_match:
+        return pipeline
 
-        "less than": "<",
-        "below": "<",
-        "under": "<",
+    filename = read_match.group(1).strip()
+    ext = filename.split(".")[-1].lower()
 
-        "=": "=="
+    if ext == "xls":
+        ext = "xlsx"
+
+    read_op = {
+        "id": generate_id(),
+        "operation": READ_EXTENSION_OPS[ext],
+        "output": current_table,
+        "path": filename
     }
 
-    for pattern in patterns:
+    # -------------------------------------------------
+    # SHEET NAME
+    # -------------------------------------------------
 
-        match = re.search(pattern, prompt, re.I)
+    sheet_match = re.search(SHEET_PATTERN, prompt, re.I)
+    read_op["sheet_name"] = (
+        sheet_match.group(1).strip() if sheet_match else "Sheet1"
+    )
 
-        if match:
+    # -------------------------------------------------
+    # SKIP ROWS
+    # -------------------------------------------------
 
-            column = match.group(1)
+    skip_match = re.search(SKIP_ROWS_PATTERN, prompt, re.I)
 
-            operator = match.group(2)
+    if skip_match:
+        read_op["skip_rows"] = int(skip_match.group(1))
 
-            value = int(match.group(3))
+    # -------------------------------------------------
+    # PREVIEW ROWS
+    # -------------------------------------------------
 
-            operator = operator_map.get(operator, operator)
+    rows_match = re.search(PREVIEW_ROWS_PATTERN, prompt, re.I)
 
-            add_step(
-                pipeline,
-                "filter_rows",
-                position=match.start(),
-                input="dataframe",
-                output="dataframe",
-                column=column,
-                operator=operator,
-                value=value
-            )
+    if rows_match:
 
-            break
+        value = rows_match.group(1)
+
+        if value.isdigit():
+            read_op["rows"] = int(value)
+        elif value.lower() in NUMBER_WORDS:
+            read_op["rows"] = NUMBER_WORDS[value.lower()]
+
+        read_op["preview"] = True
+
+    # -------------------------------------------------
+
+    add_step(
+        pipeline,
+        read_op["operation"],
+        position=read_match.start(),
+        **{k: v for k, v in read_op.items() if k != "operation"}
+    )
 
     return pipeline
 
 
+# ============================================================
+# COLUMN OPERATIONS (rename, sort, drop, select, combine,
+# drop-duplicates, fill-missing)
+# ============================================================
 
-def parse_export(prompt):
+FILL_MISSING_PATTERNS = [
+    # replace missing salary with 0
+    r"replace\s+missing\s+(.+?)(?:\s+values?)?\s+with\s+([^\s]+)",
+    # salary blank put 0
+    r"(.+?)\s+blank\s+put\s+([^\s]+)",
+    # salary blank replace with 0
+    r"(.+?)\s+blank\s+replace\s+with\s+([^\s]+)",
+    # fill missing salary with 0
+    r"fill\s+missing\s+(.+?)\s+with\s+([^\s]+)",
+]
 
-    pipeline=[]
-    current_table = "dataframe"
+_SELECT_STOPWORDS = {
+    "then", "also", "now", "get", "and",
+    "the", "a", "an", "please", "next"
+}
 
-    export_match = re.search(
-        r"(?:save|export)?\s*([\w\-]+\.csv)",
-        prompt,
-        re.IGNORECASE
+
+def _build_rename(m, table, prompt):
+    return {
+        "input": table, "output": table,
+        "mapping": {m.group(1).lower(): m.group(2).lower()},
+    }
+
+
+def _build_sort(m, table, prompt):
+    order = m.group(2) or "ascending"
+    return {
+        "input": table, "output": table,
+        "by": m.group(1),
+        "ascending": order.lower() in ("ascending", "asc"),
+    }
+
+
+def _build_drop_columns(m, table, prompt):
+    return {"input": table, "output": table, "cols": [m.group(1).strip()]}
+
+
+def _build_select_columns(m, table, prompt):
+
+    cols_text = m.group(1).lower()
+
+    cols_text = re.sub(r"\bsort\b.*", "", cols_text, flags=re.I)
+    cols_text = re.sub(r"\border\b.*", "", cols_text, flags=re.I)
+
+    cols_text = re.sub(
+        r"\b(?:greater\s+than|more\s+than|less\s+than|above|below|over|under)\s+\d+\b",
+        "", cols_text, flags=re.I,
+    )
+    cols_text = re.sub(r"[><=!]=?\s*\d+", "", cols_text)
+
+    cols_text = re.sub(
+        r"\b(column|columns|whose|where|then|with|having|save|export|write|"
+        r"store|download|finally|records|rows|employee|employees|"
+        r"ascending|descending|asc|desc|by)\b",
+        "", cols_text, flags=re.I,
     )
 
-    if export_match:
+    cols_text = cols_text.replace(".", " ").replace("(", " ").replace(")", " ")
+    cols_text = re.sub(r"\s+", " ", cols_text).strip()
 
-        filename = export_match.group(1)
+    raw_cols = re.split(r",|\band\b", cols_text)
 
-        if not filename.lower().endswith(".xlsx"):
+    cols = []
 
-                add_step(
-                    pipeline,
-                    "write_csv",
-                    position=export_match.start(),
-                    input=current_table,
-                    path=filename
-                    )
+    for col in raw_cols:
 
- # JSON
-    json_match = re.search(
-        r"convert\s+to\s+json",
-        prompt,
-        re.I
-    )
+        col = col.strip()
 
-    if json_match:
+        if not col:
+            continue
 
-        add_step(
-            pipeline,
-            "to_json",
-            position=json_match.start(),
-            input="dataframe",
-            path="output.json"
-        )
+        col = re.sub(r"\d+", "", col).strip()
 
-    # HTML
-    html_match = re.search(
-        r"convert\s+to\s+html",
-        prompt,
-        re.I
-    )
+        if not col:
+            continue
 
-    if html_match:
+        # If more than one space-separated word remains, it's
+        # usually several column names typed without a comma or
+        # "and" between them - treat each word as its own
+        # candidate column instead of merging or dropping them.
+        for word in col.split():
 
-        add_step(
-            pipeline,
-            "to_html",
-            position=html_match.start(),
-            input="dataframe",
-            path="output.html"
-        )
+            word = normalize_col(word)
+
+            if word and word not in _SELECT_STOPWORDS and word not in cols:
+                cols.append(word)
+
+    if not cols:
+        return None
+
+    return {"input": table, "output": table, "cols": cols}
 
 
-    return pipeline
+def _build_combine(m, table, prompt):
+    col1, col2 = m.group(1).strip(), m.group(2).strip()
+    return {
+        "input": table, "output": table,
+        "columns": [col1, col2],
+        "new_column": f"{col1}_{col2}",
+    }
 
 
-def parse_transform(prompt):
+def _build_drop_duplicates(m, table, prompt):
+    return {
+        "input": table, "output": table,
+        "subset": [normalize_col(m.group(1))],
+    }
+
+
+def _build_fill_missing(m, table, prompt):
+
+    value = m.group(2).strip()
+
+    if value.isdigit():
+        value = int(value)
+    elif re.fullmatch(r"\d+\.\d+", value):
+        value = float(value)
+
+    return {
+        "input": table, "output": table,
+        "column": normalize_col(m.group(1)),
+        "value": value,
+    }
+
+
+COLUMN_RULES = [
+    {
+        "operation": "rename_columns",
+        "patterns": [rf"(?:rename|change)\s+(.+?)\s+(?:to|as|into)\s+(.+?){NEXT_OP_DEFAULT}"],
+        "build": _build_rename,
+    },
+    {
+        "operation": "sort_values",
+        "patterns": [rf"sort(?:\s+by)?\s+(.+?)(?:\s+(ascending|descending|asc|desc))?{NEXT_OP_DEFAULT}"],
+        "build": _build_sort,
+    },
+    {
+        "operation": "drop_columns",
+        "patterns": [r"(?:remove|drop)\s+(.+?)\s+column"],
+        "build": _build_drop_columns,
+    },
+    {
+        "operation": "select_columns",
+        "patterns": [
+            r"(?:keep\s+only|keep\s+just|just\s+keep|need\s+only|only\s+need|"
+            r"i\s+just\s+need|just\s+need|"
+            r"select|retain|include\s+only|show\s+only|display\s+only|"
+            r"i\s+want\s+only|only\s+give(?:\s+me)?|give\s+only|"
+            r"(?:just\s+)?(?:give|gimme)(?:\s+me)?(?:\s+only)?)\s+(.+?)"
+            + NEXT_OP_SELECT
+        ],
+        "build": _build_select_columns,
+    },
+    {
+        "operation": "combine_columns",
+        "patterns": [rf"combine\s+(.+?)\s+and\s+(.+?){NEXT_OP_DEFAULT}"],
+        "build": _build_combine,
+    },
+    {
+        "operation": "drop_duplicates",
+        "patterns": [
+            rf"(?:remove|drop)\s+duplicate(?:s)?(?:\s+rows)?(?:\s+based\s+on|using)?\s+(.+?){NEXT_OP_DUPLICATES}"
+        ],
+        "build": _build_drop_duplicates,
+    },
+    {
+        "operation": "fill_missing",
+        "mode": "all",
+        "patterns": FILL_MISSING_PATTERNS,
+        "build": _build_fill_missing,
+    },
+]
+
+
+def parse_column(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, COLUMN_RULES, table)
+
+
+# ============================================================
+# MATH OPERATIONS
+# ============================================================
+
+def _build_multiply(m, table, prompt):
+
+    col1, col2 = m.group(1), m.group(2)
+    result = f"{col1}_x_{col2}"
+
+    result_match = re.search(r"create\s+new\s+column\s+(\w+)", prompt, re.I)
+
+    if result_match:
+        result = result_match.group(1)
+
+    return {
+        "input": table, "output": table,
+        "col1": col1, "col2": col2, "result": result,
+    }
+
+
+def _build_add_constant(m, table, prompt):
+    return {
+        "input": table, "output": table,
+        "col": m.group(2).strip(), "value": int(m.group(1)),
+    }
+
+
+def _build_subtract_constant(m, table, prompt):
+    return {
+        "input": table, "output": table,
+        "col": m.group(2).strip(), "value": int(m.group(1)),
+    }
+
+
+def _build_add_constant_referential(m, table, prompt):
+    # "in the Hours Worked column, add 10 to it" - column name is
+    # named up front, the operation refers back to it with "it".
+    return {
+        "input": table, "output": table,
+        "col": m.group(1).strip(), "value": int(m.group(2)),
+    }
+
+
+def _build_subtract_constant_referential(m, table, prompt):
+    # "in the Hours Worked column, subtract 10 from it"
+    return {
+        "input": table, "output": table,
+        "col": m.group(1).strip(), "value": int(m.group(2)),
+    }
+
+
+def _build_divide(m, table, prompt):
+    col1, col2 = m.group(1), m.group(2)
+    return {
+        "input": table, "output": table,
+        "col1": col1, "col2": col2,
+        "result": f"{col1}_per_{col2}",
+    }
+
+
+def _build_aggregate_sum(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(1), "agg": "sum"}
+
+
+def _build_aggregate_mean(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(1), "agg": "mean"}
+
+
+def _build_aggregate_max(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(1), "agg": "max"}
+
+
+def _build_group_aggregate(m, table, prompt):
+    return {
+        "input": table, "output": table,
+        "column": m.group(2), "groupby": m.group(3),
+        "agg": AGG_WORD_MAP[m.group(1).lower()],
+    }
+
+
+MATH_RULES = [
+    {
+        "operation": "multiply_columns",
+        "patterns": [rf"multiply\s+(.+?)\s+(?:and|by)\s+(.+?){NEXT_OP_MATH}"],
+        "build": _build_multiply,
+    },
+    {
+        # "in the Hours Worked column, add 10 to it" - checked
+        # before the generic pattern below so the referential
+        # "it" doesn't get treated as a literal column name.
+        "operation": "add_constant",
+        "patterns": [
+            r"in\s+the\s+(.+?)\s+column\s*,?\s*add\s+(\d+)\s+to\s+it"
+        ],
+        "build": _build_add_constant_referential,
+    },
+    {
+        "operation": "subtract_constant",
+        "patterns": [
+            r"in\s+the\s+(.+?)\s+column\s*,?\s*subtract\s+(\d+)\s+from\s+it"
+        ],
+        "build": _build_subtract_constant_referential,
+    },
+    {
+        "operation": "add_constant",
+        "patterns": [
+            rf"(?:add|increase)\s+(\d+)(?:\s+value)?\s+(?:to|into)"
+            rf"(?:\s+the)?\s+(?!it\b)(.+?)(?:\s+column)?{NEXT_OP_MATH}"
+        ],
+        "build": _build_add_constant,
+    },
+    {
+        "operation": "subtract_constant",
+        "patterns": [rf"subtract\s+(\d+)\s+from\s+(?!it\b)(.+?){NEXT_OP_MATH}"],
+        "build": _build_subtract_constant,
+    },
+    {
+        "operation": "divide_columns",
+        "patterns": [rf"divide\s+(.+?)\s+by\s+(.+?){NEXT_OP_MATH}"],
+        "build": _build_divide,
+    },
+    {
+        "operation": "aggregate",
+        "patterns": [r"sum\s+of\s+(\w+)"],
+        "build": _build_aggregate_sum,
+    },
+    {
+        "operation": "aggregate",
+        "patterns": [r"(?:average|mean)\s+(?:of\s+)?(\w+)"],
+        "build": _build_aggregate_mean,
+    },
+    {
+        "operation": "aggregate",
+        "patterns": [r"max\s+(?:of\s+)?(\w+)"],
+        "build": _build_aggregate_max,
+    },
+    {
+        "operation": "aggregate",
+        "patterns": [r"(aggregate|sum|total|average|mean|max|min)\s+(\w+)\s+by\s+(\w+)"],
+        "build": _build_group_aggregate,
+    },
+]
+
+
+def parse_math(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, MATH_RULES, table)
+
+
+# ============================================================
+# STRING OPERATIONS
+# ============================================================
+
+UPPER_PATTERNS = [
+    r"(?:convert|change)\s+(.+?)\s+to\s+uppercase",
+    r"(?:convert|change)\s+(.+?)\s+uppercase",
+    r"\b(.+?)\s+(?:convert|change)\s+uppercase\b",
+    r"(.+?)\s+should\s+be\s+uppercase",
+    r"make\s+(.+?)\s+uppercase",
+    r"\buppercase\s+(.+?)(?=\s+(?:lowercase|replace|rename|sort|trim|split|extract|save|export|write|$))",
+]
+
+LOWER_PATTERNS = [
+    r"(?:convert|change)\s+(\w+)\s+to\s+lowercase",
+    r"(?:convert|change)\s+(\w+)\s+lowercase",
+    r"\b(\w+)\s+(?:convert|change)\s+lowercase\b",
+    r"(\w+)\s+should\s+be\s+lowercase",
+    r"make\s+(\w+)\s+lowercase",
+    r"\blowercase\s+(\w+)",
+]
+
+REPLACE_COLUMN_PATTERN = rf"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+){NEXT_OP_STRING}"
+REPLACE_GLOBAL_PATTERN = rf"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?){NEXT_OP_STRING}"
+
+TRIM_PATTERN = r"trim\s+whitespace(?:\s+from\s+(\w+))?"
+SPLIT_PATTERN = r"split\s+(\w+)(?=\s+(?:extract|save|export|uppercase|lowercase|replace|trim|$))"
+
+EXTRACT_PATTERNS = [
+    r"extract\s+pattern\s+from\s+(\w+)",
+    r"extract\s+email\s+from\s+(\w+)",
+    r"extract\s+(\w+)(?=\s+(?:save|export|uppercase|lowercase|replace|split|trim|$))",
+]
+
+
+def _build_case_change(m, table, prompt):
+    col = normalize_col(m.group(1))
+    return {"input": table, "output": table, "col": col, "output_col": col}
+
+
+def _build_replace_column(m, table, prompt):
+
+    if m.group(1).lower() == "missing":
+        return None
+
+    return {
+        "input": table, "output": table,
+        "old": m.group(1).strip(), "new": m.group(2).strip(),
+        "col": normalize_col(m.group(3)),
+    }
+
+
+def _build_replace_global(m, table, prompt):
+
+    new_value = m.group(2).strip()
+
+    # Skip if this is actually a column-specific replace, e.g.
+    # "replace mumbai with bombay in city".
+    if re.search(r"\bin\s+\w+$", new_value, re.I):
+        return None
+
+    return {
+        "input": table, "output": table,
+        "old": m.group(1).strip(), "new": new_value,
+    }
+
+
+def _build_trim(m, table, prompt):
+
+    col = m.group(1)
+
+    if not col:
+        return None
+
+    return {"input": table, "output": table, "col": col, "output_col": col}
+
+
+def _build_split(m, table, prompt):
+    return {"input": table, "output": table, "col": m.group(1), "separator": " "}
+
+
+def _build_extract_pattern(m, table, prompt):
+    col = m.group(1)
+    return {
+        "input": table, "output": table,
+        "col": col, "pattern": r"([^@]+)",
+        "output_col": f"{col}_pattern",
+    }
+
+
+STRING_RULES = [
+    {"operation": "uppercase", "mode": "all", "patterns": UPPER_PATTERNS, "build": _build_case_change},
+    {"operation": "lowercase", "mode": "all", "patterns": LOWER_PATTERNS, "build": _build_case_change},
+    {"operation": "replace_str", "mode": "all", "patterns": [REPLACE_COLUMN_PATTERN], "build": _build_replace_column},
+    {"operation": "replace_str", "mode": "all", "patterns": [REPLACE_GLOBAL_PATTERN], "build": _build_replace_global},
+    {"operation": "trim_whitespace", "patterns": [TRIM_PATTERN], "build": _build_trim},
+    {"operation": "split_column", "patterns": [SPLIT_PATTERN], "build": _build_split},
+    {"operation": "extract_pattern", "patterns": EXTRACT_PATTERNS, "build": _build_extract_pattern},
+]
+
+
+def parse_string(prompt, table=DEFAULT_TABLE):
+
+    if not isinstance(prompt, str):
+        return []
+
+    prompt = prompt.lower().strip()
+
+    try:
+        return run_pattern_rules(prompt, STRING_RULES, table)
+    except Exception as e:
+        print("Parser Error:", str(e))
+        return []
+
+
+# ============================================================
+# FILTER
+# ============================================================
+
+FILTER_PATTERNS = [
+    # Filter salary > 40000
+    r"filter\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+    # where salary > 40000
+    r"where\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+    # salary greater than 40000
+    r"(.+?)\s+(greater than|more than|above|over|exceeds)\s+(\d+)",
+    # salary less than 40000
+    r"(.+?)\s+(less than|below|under)\s+(\d+)",
+]
+
+
+def _build_filter(m, table, prompt):
+    operator = FILTER_OPERATOR_MAP.get(m.group(2), m.group(2))
+    return {
+        "input": table, "output": table,
+        "column": m.group(1), "operator": operator,
+        "value": int(m.group(3)),
+    }
+
+
+FILTER_RULES = [
+    {"operation": "filter_rows", "patterns": FILTER_PATTERNS, "build": _build_filter},
+]
+
+
+def parse_filter(prompt, table=DEFAULT_TABLE):
+    prompt = prompt.lower()
+    return run_pattern_rules(prompt, FILTER_RULES, table)
+
+
+# ============================================================
+# EXPORT
+# ============================================================
+
+EXPORT_WITH_EXT_PATTERN = (
+    r"(?:save|store|write|export)"
+    r".*?"
+    r"([A-Za-z0-9_.-]+\.(?:csv|xlsx|xls|json|html))"
+)
+
+EXPORT_AS_NAME_PATTERN = (
+    r"(?:save|store|write|export)"
+    r"(?:\s+the)?"
+    r"(?:\s+final)?"
+    r"(?:\s+output)?"
+    r"(?:\s+dataframe)?"
+    r"\s+as\s+([A-Za-z0-9_-]+)"
+)
+
+EXPORT_BARE_NAME_PATTERN = r"(?:save|store|write|export)\s+([A-Za-z0-9_-]+)"
+
+
+def parse_export(prompt, table=None):
 
     pipeline = []
+    current_table = table if table is not None else resolve_table_name(prompt)
 
-    match = re.search(
-        r"transpose\s+(?:data|table)?",
-        prompt,
-        re.I
-    )
+    # Filename WITH extension.
+    export_match = re.search(EXPORT_WITH_EXT_PATTERN, prompt, re.I)
 
-    if match:
+    # Filename WITHOUT extension.
+    # Case 1: "save the final output as result"
+    if not export_match:
+        export_match = re.search(EXPORT_AS_NAME_PATTERN, prompt, re.I)
 
-        add_step(
-            pipeline,
-            "transpose",
-            position=match.start(),
-            input="dataframe",
-            output="dataframe"
-        )
+    # Case 2: "save result"
+    if not export_match:
+        export_match = re.search(EXPORT_BARE_NAME_PATTERN, prompt, re.I)
 
-    return pipeline
-
-
-def parse_reindex(prompt):
-
-    pipeline = []
-
-    match = re.search(
-        r"reindex\s+columns",
-        prompt,
-        re.I
-    )
-
-    if match:
-
-        add_step(
-            pipeline,
-            "reindex_columns",
-            position=match.start(),
-            input="dataframe",
-            output="dataframe"
-        )
-
-    return pipeline
-
-
-
-def parse_drop_rows(prompt):
-
-    pipeline = []
-
-    range_match = re.search(
-        r"drop\s+rows?\s+(\d+)\s+to\s+(\d+)",
-        prompt,
-        re.I
-    )
-
-    if range_match:
-
-        start = int(
-            range_match.group(1)
-        )
-
-        end = int(
-            range_match.group(2)
-        )
-
-        add_step(
-            pipeline,
-            "drop_rows_by_index",
-            position=range_match.start(),
-            input="dataframe",
-            output="dataframe",
-            rows=list(range(start, end + 1))
-        )
-
+    if not export_match:
         return pipeline
 
+    filename = export_match.group(1).strip().strip("\"'")
 
-    single_match = re.search(
-        r"drop\s+rows?\s+([\d,\s]+)",
-        prompt,
-        re.I
-    )
+    if "." not in filename:
+        filename += ".csv"
 
-    if single_match:
+    ext = filename.rsplit(".", 1)[1].lower()
+    operation = EXPORT_EXTENSION_OPS.get(ext)
 
-        rows = [
-
-            int(
-                x.strip()
-            )
-
-            for x in single_match
-            .group(1)
-            .split(",")
-
-        ]
-
+    if operation:
         add_step(
             pipeline,
-            "drop_rows_by_index",
-            position=single_match.start(),
-            input="dataframe",
-            output="dataframe",
-            rows=rows
+            operation,
+            position=export_match.start(),
+            input=current_table,
+            path=filename,
         )
 
     return pipeline
 
 
-def parse_use_row_as_header(prompt):
+# ============================================================
+# TRANSFORM / REINDEX / HEADER / DROP-ROWS / PIVOT
+# ============================================================
 
-    pipeline=[]
-
-    match = re.search(
-        r"use\s+row\s+(\d+)\s+as\s+header",
-        prompt,
-        re.I
-    )
-
-    if match:
-
-        add_step(
-            pipeline,
-            "use_row_as_header",
-            position=match.start(),
-            input="dataframe",
-            output="dataframe",
-            row=int(match.group(1))
-        )
-
-    return pipeline
+def _build_transpose(m, table, prompt):
+    return {"input": table, "output": table}
 
 
-def parse_pivot(prompt):
-
-    pipeline=[]
-
-    match = re.search(
-        r"pivot\s+table\s+by\s+(\w+)"
-        r"(?:\s+values?\s+(\w+))?"
-        r"(?:\s+(?:aggfunc|using|agg)\s+(\w+))?",
-        prompt,
-        re.I
-    )
-
-    if match:
-
-        index_col = match.group(1)
-
-        # values column: use whatever the user named; if they didn't
-        # name one, fall back to the index column itself rather than
-        # guessing an unrelated business field.
-        values_col = match.group(2) or index_col
-
-        agg_map = {
-            "sum": "sum", "total": "sum",
-            "average": "mean", "mean": "mean",
-            "max": "max", "min": "min", "count": "count"
-        }
-
-        aggfunc = agg_map.get(
-            (match.group(3) or "sum").lower(),
-            "sum"
-        )
-
-        add_step(
-            pipeline,
-            "pivot_table",
-            position=match.start(),
-            input="dataframe",
-            output="dataframe",
-            index=index_col,
-            values=values_col,
-            aggfunc=aggfunc
-        )
-
-    return pipeline
+TRANSFORM_RULES = [
+    {"operation": "transpose", "patterns": [r"transpose\s+(?:data|table)?"], "build": _build_transpose},
+]
 
 
+def parse_transform(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, TRANSFORM_RULES, table)
 
-def parse_date(prompt):
 
-    pipeline = []
-    current_table = "dataframe"
+def _build_reindex(m, table, prompt):
+    return {"input": table, "output": table}
 
-    # -----------------------------
-    # Extract date parts
-    # -----------------------------
-    extract_match = re.search(
-        r"extract\s+date\s+parts\s+from\s+(\w+)",
-        prompt,
-        re.I
-    )
 
-    if extract_match:
+REINDEX_RULES = [
+    {"operation": "reindex_columns", "patterns": [r"reindex\s+columns"], "build": _build_reindex},
+]
 
-        add_step(
-            pipeline,
-            "extract_date_parts",
-            position=extract_match.start(),
-            input=current_table,
-            output=current_table,
-            column=extract_match.group(1)
-        )
 
-    # -----------------------------
-    # Add days
-    # -----------------------------
-    add_match = re.search(
-        r"add\s+(\d+)\s+days?\s+to\s+(\w+)",
-        prompt,
-        re.I
-    )
+def parse_reindex(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, REINDEX_RULES, table)
 
-    if add_match:
 
-        add_step(
-            pipeline,
-            "add_days",
-            position=add_match.start(),
-            input=current_table,
-            output=current_table,
-            column=add_match.group(2),
-            days=int(add_match.group(1))
-        )
+def _build_use_row_as_header(m, table, prompt):
+    return {"input": table, "output": table, "row": int(m.group(1))}
 
-    # -----------------------------
-    # Subtract days
-    # -----------------------------
-    subtract_match = re.search(
-        r"subtract\s+(\d+)\s+days?\s+from\s+(\w+)",
-        prompt,
-        re.I
-    )
 
-    if subtract_match:
+HEADER_RULES = [
+    {
+        "operation": "use_row_as_header",
+        "patterns": [r"use\s+row\s+(\d+)\s+as\s+header"],
+        "build": _build_use_row_as_header,
+    },
+]
 
-        add_step(
-            pipeline,
-            "subtract_days",
-            position=subtract_match.start(),
-            input=current_table,
-            output=current_table,
-            column=subtract_match.group(2),
-            days=int(subtract_match.group(1))
-        )
 
-    # -----------------------------
-    # Format date
-    # -----------------------------
-    format_match = re.search(
-        r"format\s+(?:date\s+column\s+(\w+)|(\w+)\s+as\s+date|(\w+)\s+date\s+column)",
-        prompt,
-        re.I
-    )
+def parse_use_row_as_header(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, HEADER_RULES, table)
 
-    if format_match:
 
-        date_col = (
-            format_match.group(1)
-            or format_match.group(2)
-            or format_match.group(3)
-        )
+def _build_drop_rows(m, table, prompt):
 
-        add_step(
-            pipeline,
-            "format_date",
-            position=format_match.start(),
-            input=current_table,
-            output=current_table,
-            column=date_col
-        )
+    # The "range" pattern has 2 groups, the "single list" pattern
+    # has 1 - use that to tell which one matched instead of two
+    # separate mutually-unaware code paths.
+    if m.lastindex == 2:
+        start, end = int(m.group(1)), int(m.group(2))
+        return {"input": table, "output": table, "rows": list(range(start, end + 1))}
 
-    # -----------------------------
-    # Date Difference
-    # Supports:
-    # date difference between start and end
-    # date difference between start and end as delivery_days
-    # date difference between start and end into delivery_days
-    # date difference between start and end called delivery_days
-    # -----------------------------
-    diff_match = re.search(
-        r"""
-        date\s+difference\s+between\s+
-        (\w+)\s+
-        and\s+
-        (\w+)
-        (?:\s+
-            (?:as|into|called|named)
-            \s+
+    rows = [int(x.strip()) for x in m.group(1).split(",") if x.strip()]
+
+    return {"input": table, "output": table, "rows": rows}
+
+
+DROP_ROWS_RULES = [
+    {
+        "operation": "drop_rows_by_index",
+        "patterns": [
+            r"drop\s+rows?\s+(\d+)\s+to\s+(\d+)",
+            r"drop\s+rows?\s+([\d,\s]+)",
+        ],
+        "build": _build_drop_rows,
+    },
+]
+
+
+def parse_drop_rows(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, DROP_ROWS_RULES, table)
+
+
+def _build_pivot(m, table, prompt):
+
+    index_col = m.group(1)
+
+    # values column: use whatever the user named; if they didn't
+    # name one, fall back to the index column itself rather than
+    # guessing an unrelated business field.
+    values_col = m.group(2) or index_col
+    aggfunc = AGG_WORD_MAP.get((m.group(3) or "sum").lower(), "sum")
+
+    return {
+        "input": table, "output": table,
+        "index": index_col, "values": values_col, "aggfunc": aggfunc,
+    }
+
+
+PIVOT_RULES = [
+    {
+        "operation": "pivot_table",
+        "patterns": [
+            r"pivot\s+table\s+by\s+(\w+)"
+            r"(?:\s+values?\s+(\w+))?"
+            r"(?:\s+(?:aggfunc|using|agg)\s+(\w+))?"
+        ],
+        "build": _build_pivot,
+    },
+]
+
+
+def parse_pivot(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, PIVOT_RULES, table)
+
+
+# ============================================================
+# DATE OPERATIONS
+# ============================================================
+
+def _build_extract_date_parts(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(1)}
+
+
+def _build_add_days(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(2), "days": int(m.group(1))}
+
+
+def _build_subtract_days(m, table, prompt):
+    return {"input": table, "output": table, "column": m.group(2), "days": int(m.group(1))}
+
+
+def _build_format_date(m, table, prompt):
+    date_col = m.group(1) or m.group(2) or m.group(3)
+    return {"input": table, "output": table, "column": date_col}
+
+
+def _build_date_diff(m, table, prompt):
+    result_col = m.group(3) or "days_difference"
+    return {
+        "input": table, "output": table,
+        "start_col": m.group(1), "end_col": m.group(2),
+        "result": result_col,
+    }
+
+
+DATE_RULES = [
+    {
+        "operation": "extract_date_parts",
+        "patterns": [rf"extract\s+date\s+parts\s+from\s+(.+?){NEXT_OP_DEFAULT}"],
+        "build": _build_extract_date_parts,
+    },
+    {
+        "operation": "add_days",
+        "patterns": [r"add\s+(\d+)\s+days?\s+to\s+(\w+)"],
+        "build": _build_add_days,
+    },
+    {
+        "operation": "subtract_days",
+        "patterns": [r"subtract\s+(\d+)\s+days?\s+from\s+(\w+)"],
+        "build": _build_subtract_days,
+    },
+    {
+        "operation": "format_date",
+        "patterns": [r"format\s+(?:date\s+column\s+(\w+)|(\w+)\s+as\s+date|(\w+)\s+date\s+column)"],
+        "build": _build_format_date,
+    },
+    {
+        "operation": "date_diff",
+        # Supports:
+        # date difference between start and end
+        # date difference between start and end as/into/called/named delivery_days
+        "patterns": [
+            r"""
+            date\s+difference\s+between\s+
+            (\w+)\s+
+            and\s+
             (\w+)
-        )?
-        """,
-        prompt,
-        re.I | re.X
-    )
-
-    if diff_match:
-
-        result_col = diff_match.group(3) or "days_difference"
-
-        add_step(
-            pipeline,
-            "date_diff",
-            position=diff_match.start(),
-            input=current_table,
-            output=current_table,
-            start_col=diff_match.group(1),
-            end_col=diff_match.group(2),
-            result=result_col
-        )
-
-    return pipeline
+            (?:\s+
+                (?:as|into|called|named)
+                \s+
+                (\w+)
+            )?
+            """
+        ],
+        "flags": re.I | re.X,
+        "build": _build_date_diff,
+    },
+]
 
 
-def parse_sql(prompt):
-
-    pipeline = []
-
-    match = re.search(
-        r"write\s+to\s+sql(?:\s+table\s+(\w+))?",
-        prompt,
-        re.I
-    )
-
-    if match:
-
-        table = match.group(1)
-
-        if not table:
-            # No table name given - fall back to the source
-            # filename (e.g. "sales.xlsx" -> "sales") rather than
-            # guessing an unrelated business table name.
-            file_match = re.search(
-                r"([\w\-]+)\.(csv|xlsx|json)",
-                prompt,
-                re.I
-            )
-            table = file_match.group(1) if file_match else "output_table"
-
-        add_step(
-            pipeline,
-            "write_sql",
-            position=match.start(),
-            input="dataframe",
-            connection="sqlite:///database.db",
-            table=table,
-            output="dataframe"
-        )
-
-    return pipeline
+def parse_date(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, DATE_RULES, table)
 
 
+# ============================================================
+# SQL / DATABASE
+# ============================================================
 
-def parse_read_database(prompt):
+def _build_write_sql(m, table, prompt):
 
-    pipeline = []
+    sql_table = m.group(1)
 
-    match = re.search(
-        r"read\s+database(?:\s+table\s+(\w+))?",
-        prompt,
-        re.I
-    )
+    if not sql_table:
+        # No table name given - fall back to the source filename
+        # (e.g. "sales.xlsx" -> "sales") rather than guessing an
+        # unrelated business table name.
+        file_match = re.search(r"([\w\-]+)\.(csv|xlsx|json)", prompt, re.I)
+        sql_table = file_match.group(1) if file_match else "output_table"
 
-    if match:
+    return {
+        "input": table, "output": table,
+        "connection": "sqlite:///database.db",
+        "table": sql_table,
+    }
 
-        table = match.group(1) or "source_table"
 
-        add_step(
-            pipeline,
-            "read_database",
-            position=match.start(),
-            output="dataframe",
-            table=table
-        )
+SQL_RULES = [
+    {
+        "operation": "write_sql",
+        "patterns": [r"write\s+to\s+sql(?:\s+table\s+(\w+))?"],
+        "build": _build_write_sql,
+    },
+]
 
-    return pipeline
 
+def parse_sql(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, SQL_RULES, table)
+
+
+def _build_read_database(m, table, prompt):
+    return {"output": table, "table": m.group(1) or "source_table"}
+
+
+READ_DB_RULES = [
+    {
+        "operation": "read_database",
+        "patterns": [r"read\s+database(?:\s+table\s+(\w+))?"],
+        "build": _build_read_database,
+    },
+]
+
+
+def parse_read_database(prompt, table=DEFAULT_TABLE):
+    return run_pattern_rules(prompt, READ_DB_RULES, table)
+
+
+# ============================================================
+# PIPELINE POST-PROCESSING (unchanged logic; already config/data
+# driven via the PRIORITY / _OP_COLUMN_SPEC tables)
+# ============================================================
 
 def validate_pipeline(pipeline):
 
@@ -1516,7 +1237,6 @@ def validate_pipeline(pipeline):
     return None
 
 
-
 def remove_duplicate_steps(pipeline):
 
     unique = []
@@ -1534,8 +1254,6 @@ def remove_duplicate_steps(pipeline):
             unique.append(step)
 
     return unique
-
-
 
 
 def reorder_pipeline(pipeline):
@@ -1615,7 +1333,6 @@ def reorder_pipeline(pipeline):
             999
         )
     )
-
 
 
 def _step_requires_and_produces(step):
@@ -1722,46 +1439,53 @@ def enforce_dependency_order(pipeline):
     return others + exports
 
 
+# ============================================================
+# TOP-LEVEL DRIVERS
+# ============================================================
+
+# name -> parser function. Adding a whole new *family* of
+# operations means adding one entry here (and a RULES table +
+# parse_* function above) - build_regex_pipeline itself never
+# needs to change.
+PARSERS = [
+    ("read", parse_read),
+    ("column", parse_column),
+    ("math", parse_math),
+    ("string", parse_string),
+    ("filter", parse_filter),
+    ("transform", parse_transform),
+    ("pivot", parse_pivot),
+    ("reindex", parse_reindex),
+    ("header", parse_use_row_as_header),
+    ("drop", parse_drop_rows),
+    ("date", parse_date),
+    ("sql", parse_sql),
+    ("database", parse_read_database),
+    ("export", parse_export),
+]
+
+
 def build_regex_pipeline(prompt):
+
+    # Resolve the dataframe/table name ONCE per prompt and hand it
+    # to every parser, instead of each one hardcoding "dataframe".
+    table = resolve_table_name(prompt)
 
     pipeline = []
 
-    pipeline.extend(parse_read(prompt))
-    pipeline.extend(parse_column(prompt))
-    pipeline.extend(parse_math(prompt))
-    pipeline.extend(parse_string(prompt))
-    pipeline.extend(parse_filter(prompt))
-    pipeline.extend(parse_transform(prompt))
-    pipeline.extend(parse_pivot(prompt))
-    pipeline.extend(parse_reindex(prompt))
-    pipeline.extend(parse_use_row_as_header(prompt))
-    pipeline.extend(parse_drop_rows(prompt))
-    pipeline.extend(parse_date(prompt))
-    pipeline.extend(parse_sql(prompt))
-    pipeline.extend(parse_read_database(prompt))
-    pipeline.extend(parse_export(prompt))
+    for name, parser in PARSERS:
+        steps = parser(prompt, table)
+        pipeline.extend(steps)
 
     return pipeline
 
 
 def generate_pipeline(prompt, file_path=None):
 
-    print("=" * 60)
-    print("Original Prompt")
-    print(prompt)
-
     try:
-
         normalized_prompt = normalize_prompt(prompt)
-
-        print("=" * 60)
-        print("Normalized Prompt")
-        print(normalized_prompt)
-
     except Exception as e:
-
         print("LLM Error:", e)
-
         normalized_prompt = prompt
 
     # Build pipeline (ALWAYS)
@@ -1771,7 +1495,7 @@ def generate_pipeline(prompt, file_path=None):
     pipeline = remove_duplicate_steps(pipeline)
 
     pipeline.sort(key=lambda step: step.get("__pos", 999999))
-    pipeline = reorder_pipeline(pipeline)
+    # pipeline = reorder_pipeline(pipeline)
     pipeline = enforce_dependency_order(pipeline)
 
     for step in pipeline:
@@ -1783,10 +1507,6 @@ def generate_pipeline(prompt, file_path=None):
     # raises, so the user never sees an error from this step.
     if file_path:
         pipeline = remap_pipeline_columns(pipeline, file_path)
-
-    print("=" * 60)
-    print("Pipeline")
-    print(pipeline)
 
     error = validate_pipeline(pipeline)
 

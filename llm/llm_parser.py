@@ -1,27 +1,28 @@
 import os
 import re
-import google.generativeai as genai
+from google import genai
 from dotenv import load_dotenv
 
 from llm.prompt import SYSTEM_PROMPT
 
 load_dotenv()
 
-genai.configure(
+client = genai.Client(
     api_key=os.getenv("GEMINI_API_KEY")
 )
 
-model = genai.GenerativeModel(
-    "gemini-2.5-flash"
-)
+MODEL_NAME = "gemini-2.5-flash"
 
 
 def normalize_prompt(user_prompt):
 
-    response = model.generate_content(
-        SYSTEM_PROMPT +
-        "\n\nUser Prompt:\n" +
-        user_prompt
+    response = client.models.generate_content(
+        model=MODEL_NAME,
+        contents=(
+            SYSTEM_PROMPT +
+            "\n\nUser Prompt:\n" +
+            user_prompt
+        )
     )
 
     text = response.text.strip()

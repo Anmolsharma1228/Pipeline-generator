@@ -1,24 +1,112 @@
 [
     {
-        "id": 178600378415187,
-        "operation": "read_excel_any",
+        "id": 178609517585469,
+        "operation": "read_csv",
         "output": "dataframe",
-        "path": "Read Weekly_Timesheet(22 June - 27 June 2026)) (1).xlsx",
-        "sheet_name": "Weekly Timesheet",
-        "skip_rows": 8
+        "path": "sales_transactions_2026.csv",
+        "sheet_name": "Sheet1"
     },
     {
-        "id": 178600378415857,
-        "operation": "add_constant",
+        "id": 178609517585456,
+        "operation": "drop_duplicates",
         "input": "dataframe",
         "output": "dataframe",
-        "col": "Hours Worked",
-        "value": 10
+        "subset": [
+            "invoice_number"
+        ]
     },
     {
-        "id": 178600378415975,
+        "id": 178609517585425,
+        "operation": "fill_missing",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "amount",
+        "value": 0
+    },
+    {
+        "id": 178609517585436,
+        "operation": "fill_missing",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "customer_city",
+        "value": "'unknown'"
+    },
+    {
+        "id": 178609517585446,
+        "operation": "select_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "cols": [
+            "invoice_number",
+            "customer_name",
+            "customer_city",
+            "product",
+            "quantity",
+            "amount",
+            "payment_status"
+        ]
+    },
+    {
+        "id": 178609517585449,
+        "operation": "rename_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "mapping": {
+            "customer_city": "city"
+        }
+    },
+    {
+        "id": 178609517585797,
+        "operation": "uppercase",
+        "input": "dataframe",
+        "output": "dataframe",
+        "col": "customer_name",
+        "output_col": "customer_name"
+    },
+    {
+        "id": 178609517585887,
+        "operation": "lowercase",
+        "input": "dataframe",
+        "output": "dataframe",
+        "col": "city",
+        "output_col": "city"
+    },
+    {
+        "id": 178609517585775,
+        "operation": "uppercase",
+        "input": "dataframe",
+        "output": "dataframe",
+        "col": "status",
+        "output_col": "status"
+    },
+    {
+        "id": 178609517585810,
+        "operation": "replace_str",
+        "input": "dataframe",
+        "output": "dataframe",
+        "old": "'mumbai'",
+        "new": "'bombay'"
+    },
+    {
+        "id": 178609517585870,
+        "operation": "replace_str",
+        "input": "dataframe",
+        "output": "dataframe",
+        "old": "'delhi'",
+        "new": "'new delhi'"
+    },
+    {
+        "id": 178609517585473,
+        "operation": "sort_values",
+        "input": "dataframe",
+        "output": "dataframe",
+        "by": "amount descending, quantity",
+        "ascending": false
+    },
+    {
+        "id": 178609517586078,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "Final_result.csv"
+        "path": "sales_transactions_cleaned.csv"
     }
 ]

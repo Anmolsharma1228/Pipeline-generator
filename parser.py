@@ -127,6 +127,7 @@ BOUNDARY_KEYWORDS = {
         r"subtract\s+\d+\s+days?", r"format\s+date",
     ],
     "duplicates": [
+        ",",
         "then", "after", "if", "replace", "fill", "keep", "select",
         "rename", "sort", "save", "export", "write", "finally", "$",
     ],
@@ -320,15 +321,15 @@ def run_pattern_rules(prompt, rules, table):
 # ============================================================
 
 READ_PRIMARY_PATTERN = (
-    r"(?:file\s+name|file\s+named|named)\s+"
-    r"([A-Za-z0-9_\-(). ]+\.(?:csv|xlsx|xls|json))"
+    r"(?:file\s+name(?:d)?|named|open|read|load|import)"
+    r"\s+(?:this\s+file\s+|the\s+file\s+|file\s+)?"
+    r"([A-Za-z0-9_.()\-]+\.(?:csv|xlsx|xls|json))"
 )
 
-READ_FALLBACK_PATTERN = r"([A-Za-z0-9_\-(). ]+\.(csv|xlsx|xls|json))"
+READ_FALLBACK_PATTERN = r"\b([\w()\-][\w().\- ]*\.(?:csv|xlsx|xls|json))\b"
 
 SHEET_PATTERN = (
-    r"(?:sheet|worksheet)\s+(.+?)"
-    r"(?:\s+from\b|,|\s+then\b|\s+after\b|\s+skip\b|\s+save\b|$)"
+    r"(?:sheet|worksheet)\s+(.+?)(?=\n|,|\s+from\b|\s+then\b|\s+after\b|\s+skip\b|\s+save\b|$)"
 )
 
 SKIP_ROWS_PATTERN = r"skip\s+(?:the\s+)?(?:first\s+)?(\d+)\s+rows?"
@@ -464,6 +465,8 @@ def _build_sort(m, table, prompt):
 
 
 def _build_drop_columns(m, table, prompt):
+    print("DROP_COLUMNS MATCH:", repr(m.group(0)))
+    print("COLUMN:", repr(m.group(1)))
     return {"input": table, "output": table, "cols": [m.group(1).strip()]}
 
 
@@ -533,15 +536,17 @@ def _build_combine(m, table, prompt):
 
 
 def _build_drop_duplicates(m, table, prompt):
+    subset = normalize_col(m.group(1).strip(" ,.;:"))
     return {
-        "input": table, "output": table,
-        "subset": [normalize_col(m.group(1))],
+        "input": table,
+        "output": table,
+        "subset": [subset],
     }
 
 
 def _build_fill_missing(m, table, prompt):
 
-    value = m.group(2).strip()
+    value = m.group(2).strip(" ,.")
 
     if value.isdigit():
         value = int(value)
@@ -568,7 +573,7 @@ COLUMN_RULES = [
     },
     {
         "operation": "drop_columns",
-        "patterns": [r"(?:remove|drop)\s+(.+?)\s+column"],
+        "patterns": [r"(?:remove|drop)\s+(?:the\s+)?columns?\s+(.+?)" + NEXT_OP_DEFAULT],
         "build": _build_drop_columns,
     },
     {
@@ -761,8 +766,8 @@ def parse_math(prompt, table=DEFAULT_TABLE):
 # ============================================================
 
 UPPER_PATTERNS = [
-    r"(?:convert|change)\s+(.+?)\s+to\s+uppercase",
-    r"(?:convert|change)\s+(.+?)\s+uppercase",
+    r"(?:convert|change)\s+(?:the\s+)?(.+?)(?:\s+column)?\s+to\s+uppercase",
+    # r"(?:convert|change)\s+(.+?)\s+uppercase(?!\w)",
     r"\b(.+?)\s+(?:convert|change)\s+uppercase\b",
     r"(.+?)\s+should\s+be\s+uppercase",
     r"make\s+(.+?)\s+uppercase",

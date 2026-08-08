@@ -69,7 +69,7 @@ FILTER_OPERATOR_MAP = {
     "greater than": ">", "more than": ">", "above": ">",
     "over": ">", "exceeds": ">",
     "less than": "<", "below": "<", "under": "<",
-    "=": "==",
+    "=": "==", "is": "==", "equals": "==", "equal to": "==",
 }
 
 
@@ -188,6 +188,27 @@ def normalize_col(col):
     return col
 
 
+def strip_quotes(text):
+    """
+    Strip one layer of matching surrounding quotes ('...' or "...")
+    from a captured literal value. Prompts often quote the literal
+    they want inserted/matched (e.g. "replace it with 'unknown'"),
+    and the regexes that pull that text out have no reason to know
+    the quotes aren't part of the value - so every literal-value
+    capture site needs this before it lands in the pipeline JSON.
+    """
+
+    if not isinstance(text, str):
+        return text
+
+    text = text.strip()
+
+    if len(text) >= 2 and text[0] == text[-1] and text[0] in ("'", '"'):
+        return text[1:-1].strip()
+
+    return text
+
+
 def parse_columns(text):
     """
     Convert:
@@ -236,6 +257,23 @@ def resolve_table_name(prompt):
 # GENERIC RULE ENGINE
 # ============================================================
 
+def _safe_build(build, match, table, prompt, operation):
+    """
+    Call a rule's build() function defensively. A single unusual
+    phrasing causing one build function to raise (wrong group
+    index, unexpected None, etc.) must never take down the whole
+    /generate request - it should just mean that ONE step gets
+    skipped instead of the entire pipeline failing with a raw
+    500 error for a prompt that got 90% correctly parsed.
+    """
+
+    try:
+        return build(match, table, prompt)
+    except Exception as e:
+        print(f"parser: skipped a '{operation}' match -> {e}")
+        return None
+
+
 def run_pattern_rules(prompt, rules, table):
     """
     Generic driver for config-driven parsing. Each rule supplies
@@ -273,7 +311,7 @@ def run_pattern_rules(prompt, rules, table):
 
                 if match:
 
-                    kwargs = build(match, table, prompt)
+                    kwargs = _safe_build(build, match, table, prompt, operation)
 
                     if kwargs is not None:
                         add_step(
@@ -291,7 +329,7 @@ def run_pattern_rules(prompt, rules, table):
 
                 if match:
 
-                    kwargs = build(match, table, prompt)
+                    kwargs = _safe_build(build, match, table, prompt, operation)
 
                     if kwargs is not None:
                         add_step(
@@ -305,7 +343,7 @@ def run_pattern_rules(prompt, rules, table):
 
                 for match in re.finditer(pattern, prompt, flags):
 
-                    kwargs = build(match, table, prompt)
+                    kwargs = _safe_build(build, match, table, prompt, operation)
 
                     if kwargs is not None:
                         add_step(
@@ -328,9 +366,41 @@ READ_PRIMARY_PATTERN = (
 
 READ_FALLBACK_PATTERN = r"\b([\w()\-][\w().\- ]*\.(?:csv|xlsx|xls|json))\b"
 
-SHEET_PATTERN = (
-    r"(?:sheet|worksheet)\s+(.+?)(?=\n|,|\s+from\b|\s+then\b|\s+after\b|\s+skip\b|\s+save\b|$)"
-)
+SHEET_PATTERNS = [
+    # "sheet EmployeeData", "worksheet named EmployeeData" - a
+    # single identifier token right after the keyword.
+    r"(?:sheet|worksheet)\s+(?:named\s+|called\s+)?([A-Za-z0-9_]+)\b",
+    # "open the EmployeeData sheet" - name comes BEFORE the
+    # keyword, again a single identifier token.
+    r"\b(?:the\s+)?([A-Za-z0-9_]+)\s+(?:sheet|worksheet)\b",
+]
+
+# Words that can end up sitting next to "sheet"/"worksheet" without
+# actually being the sheet's name - filler words from the rest of
+# the sentence, or leftover filename-extension tokens.
+_SHEET_STOPWORDS = {
+    "first", "then", "now", "next", "also", "finally",
+    "before", "after", "the", "this", "that",
+    "excel", "file", "workbook", "spreadsheet",
+    "xlsx", "xls", "csv", "json",
+}
+
+
+def _find_sheet_name(prompt):
+
+    for pattern in SHEET_PATTERNS:
+
+        match = re.search(pattern, prompt, re.I)
+
+        if not match:
+            continue
+
+        candidate = match.group(1).strip()
+
+        if candidate and candidate.lower() not in _SHEET_STOPWORDS:
+            return candidate
+
+    return None
 
 SKIP_ROWS_PATTERN = r"skip\s+(?:the\s+)?(?:first\s+)?(\d+)\s+rows?"
 
@@ -380,13 +450,12 @@ def parse_read(prompt, table=None):
     }
 
     # -------------------------------------------------
-    # SHEET NAME
+    # SHEET NAME (Excel formats only - csv/json have no sheets)
     # -------------------------------------------------
 
-    sheet_match = re.search(SHEET_PATTERN, prompt, re.I)
-    read_op["sheet_name"] = (
-        sheet_match.group(1).strip() if sheet_match else "Sheet1"
-    )
+    if ext in ("xlsx", "xls"):
+        sheet_name = _find_sheet_name(prompt)
+        read_op["sheet_name"] = sheet_name if sheet_name else "Sheet1"
 
     # -------------------------------------------------
     # SKIP ROWS
@@ -455,13 +524,89 @@ def _build_rename(m, table, prompt):
     }
 
 
-def _build_sort(m, table, prompt):
-    order = m.group(2) or "ascending"
-    return {
-        "input": table, "output": table,
-        "by": m.group(1),
-        "ascending": order.lower() in ("ascending", "asc"),
-    }
+SORT_PATTERN = rf"sort(?:\s+by)?\s+(.+?){NEXT_OP_DEFAULT}"
+
+
+def _parse_sort_segment(text):
+    """Split one sort clause into (column, ascending) pairs, e.g.
+    "amount descending and quantity descending" or
+    "amount desc, quantity asc" -> [("amount", False), ("quantity", False)]."""
+
+    segments = re.split(r",|\band\b", text)
+    pairs = []
+
+    for segment in segments:
+
+        segment = segment.strip()
+
+        if not segment:
+            continue
+
+        dir_match = re.search(
+            r"\b(ascending|descending|asc|desc)\b", segment, re.I
+        )
+        direction = dir_match.group(1).lower() if dir_match else "ascending"
+
+        col = re.sub(
+            r"\b(ascending|descending|asc|desc|order|by)\b",
+            "", segment, flags=re.I,
+        ).strip()
+        col = normalize_col(col)
+
+        if col:
+            pairs.append((col, direction in ("ascending", "asc")))
+
+    return pairs
+
+
+def parse_sort(prompt, table=None):
+    """
+    Dedicated sort parser, run once over the whole prompt, instead
+    of being routed through the generic single-match COLUMN_RULES
+    table. A multi-column sort instruction can arrive from the LLM
+    normalizer as more than one separate "Sort ..." line (mirroring
+    how multi-column renames get split into multiple "Rename X to
+    Y" lines) - e.g.:
+
+        Sort amount descending
+        Sort quantity descending
+
+    Every "sort ..." occurrence in the prompt is found and merged,
+    in order, into ONE sort_values step. Emitting separate
+    sort_values steps instead would be wrong: calling pandas
+    sort_values() a second time just re-sorts by the newer key
+    alone and throws away the earlier one, rather than doing a
+    combined multi-column sort.
+    """
+
+    pipeline = []
+    current_table = table if table is not None else resolve_table_name(prompt)
+
+    by = []
+    ascending = []
+    first_start = None
+
+    for match in re.finditer(SORT_PATTERN, prompt, re.I):
+
+        if first_start is None:
+            first_start = match.start()
+
+        for col, asc in _parse_sort_segment(match.group(1)):
+            if col not in by:
+                by.append(col)
+                ascending.append(asc)
+
+    if not by:
+        return pipeline
+
+    add_step(
+        pipeline, "sort_values",
+        position=first_start,
+        input=current_table, output=current_table,
+        by=by, ascending=ascending,
+    )
+
+    return pipeline
 
 
 def _build_drop_columns(m, table, prompt):
@@ -493,6 +638,13 @@ def _build_select_columns(m, table, prompt):
     cols_text = cols_text.replace(".", " ").replace("(", " ").replace(")", " ")
     cols_text = re.sub(r"\s+", " ", cols_text).strip()
 
+    # Whether the user gave an explicit separator at all. If they
+    # did (comma or "and"), each segment between separators is ONE
+    # column - possibly multi-word (e.g. "customer name") - and must
+    # NOT be split further, or "customer name, amount" turns into
+    # four bogus single-word columns instead of two real ones.
+    had_separator = bool(re.search(r",|\band\b", cols_text))
+
     raw_cols = re.split(r",|\band\b", cols_text)
 
     cols = []
@@ -509,16 +661,29 @@ def _build_select_columns(m, table, prompt):
         if not col:
             continue
 
-        # If more than one space-separated word remains, it's
-        # usually several column names typed without a comma or
-        # "and" between them - treat each word as its own
-        # candidate column instead of merging or dropping them.
-        for word in col.split():
+        if had_separator:
+            # One explicit column per segment - keep multi-word
+            # names intact, just drop stray stopwords inside it.
+            words = [
+                w for w in col.split()
+                if w not in _SELECT_STOPWORDS
+            ]
 
-            word = normalize_col(word)
+            col_name = normalize_col(" ".join(words))
 
-            if word and word not in _SELECT_STOPWORDS and word not in cols:
-                cols.append(word)
+            if col_name and col_name not in cols:
+                cols.append(col_name)
+
+        else:
+            # No separator at all (e.g. "keep only city
+            # department") - the only signal we have is that each
+            # word is probably its own column.
+            for word in col.split():
+
+                word = normalize_col(word)
+
+                if word and word not in _SELECT_STOPWORDS and word not in cols:
+                    cols.append(word)
 
     if not cols:
         return None
@@ -546,7 +711,7 @@ def _build_drop_duplicates(m, table, prompt):
 
 def _build_fill_missing(m, table, prompt):
 
-    value = m.group(2).strip(" ,.")
+    value = strip_quotes(m.group(2).strip(" ,."))
 
     if value.isdigit():
         value = int(value)
@@ -563,13 +728,9 @@ def _build_fill_missing(m, table, prompt):
 COLUMN_RULES = [
     {
         "operation": "rename_columns",
+        "mode": "all",
         "patterns": [rf"(?:rename|change)\s+(.+?)\s+(?:to|as|into)\s+(.+?){NEXT_OP_DEFAULT}"],
         "build": _build_rename,
-    },
-    {
-        "operation": "sort_values",
-        "patterns": [rf"sort(?:\s+by)?\s+(.+?)(?:\s+(ascending|descending|asc|desc))?{NEXT_OP_DEFAULT}"],
-        "build": _build_sort,
     },
     {
         "operation": "drop_columns",
@@ -784,7 +945,24 @@ LOWER_PATTERNS = [
 ]
 
 REPLACE_COLUMN_PATTERN = rf"replace\s+(.+?)\s+with\s+(.+?)\s+in\s+(\w+){NEXT_OP_STRING}"
-REPLACE_GLOBAL_PATTERN = rf"replace\s+(?!missing\b)(.+?)\s+with\s+(.+?){NEXT_OP_STRING}"
+
+# Captures the ENTIRE tail of a "replace ..." clause (not just one
+# "old with new" pair) - a prompt can list several replacements in
+# ONE clause ("replace 'delhi' with 'new delhi', 'mumbai' with
+# 'bombay', and 'bangalore' with 'bengaluru'"), and the LLM
+# normalizer doesn't reliably split those onto separate lines the
+# way it sometimes does for other operations - so a dedicated
+# parser below pulls out every pair inside the span, instead of a
+# single-pair regex silently dropping every pair after the first.
+REPLACE_GLOBAL_SPAN_PATTERN = rf"replace\s+(?!missing\b)(.+?){NEXT_OP_STRING}"
+
+_REPLACE_PAIR_PATTERN = re.compile(
+    r"(?P<old>'[^']*'|\"[^\"]*\"|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+){0,2})"
+    r"\s+with\s+"
+    r"(?P<new>'[^']*'|\"[^\"]*\"|[A-Za-z0-9_]+(?:\s+[A-Za-z0-9_]+){0,2})"
+    r"(?=\s*,|\s+and\s+|\s*$)",
+    re.I,
+)
 
 TRIM_PATTERN = r"trim\s+whitespace(?:\s+from\s+(\w+))?"
 SPLIT_PATTERN = r"split\s+(\w+)(?=\s+(?:extract|save|export|uppercase|lowercase|replace|trim|$))"
@@ -808,24 +986,49 @@ def _build_replace_column(m, table, prompt):
 
     return {
         "input": table, "output": table,
-        "old": m.group(1).strip(), "new": m.group(2).strip(),
+        "old": strip_quotes(m.group(1).strip()), "new": strip_quotes(m.group(2).strip()),
         "col": normalize_col(m.group(3)),
     }
 
 
-def _build_replace_global(m, table, prompt):
+def parse_replace_global(prompt, table=None):
+    """
+    Dedicated replace_str parser (non column-specific variant),
+    run once over the whole prompt instead of routed through the
+    generic single-pair rule table - see REPLACE_GLOBAL_SPAN_PATTERN
+    for why.
+    """
 
-    new_value = m.group(2).strip()
+    pipeline = []
+    current_table = table if table is not None else resolve_table_name(prompt)
 
-    # Skip if this is actually a column-specific replace, e.g.
-    # "replace mumbai with bombay in city".
-    if re.search(r"\bin\s+\w+$", new_value, re.I):
-        return None
+    for span_match in re.finditer(REPLACE_GLOBAL_SPAN_PATTERN, prompt, re.I):
 
-    return {
-        "input": table, "output": table,
-        "old": m.group(1).strip(), "new": new_value,
-    }
+        span_text = span_match.group(1)
+
+        # Column-specific replaces ("... with ... in city") are
+        # fully handled by REPLACE_COLUMN_PATTERN elsewhere - skip
+        # this span so it isn't ALSO captured here as a (wrong)
+        # global replace missing its column.
+        if re.search(r"\bin\s+\w+\s*$", span_text, re.I):
+            continue
+
+        for pair_match in _REPLACE_PAIR_PATTERN.finditer(span_text):
+
+            old = strip_quotes(pair_match.group("old").strip())
+            new = strip_quotes(pair_match.group("new").strip())
+
+            if not old or not new:
+                continue
+
+            add_step(
+                pipeline, "replace_str",
+                position=span_match.start(),
+                input=current_table, output=current_table,
+                old=old, new=new,
+            )
+
+    return pipeline
 
 
 def _build_trim(m, table, prompt):
@@ -855,7 +1058,6 @@ STRING_RULES = [
     {"operation": "uppercase", "mode": "all", "patterns": UPPER_PATTERNS, "build": _build_case_change},
     {"operation": "lowercase", "mode": "all", "patterns": LOWER_PATTERNS, "build": _build_case_change},
     {"operation": "replace_str", "mode": "all", "patterns": [REPLACE_COLUMN_PATTERN], "build": _build_replace_column},
-    {"operation": "replace_str", "mode": "all", "patterns": [REPLACE_GLOBAL_PATTERN], "build": _build_replace_global},
     {"operation": "trim_whitespace", "patterns": [TRIM_PATTERN], "build": _build_trim},
     {"operation": "split_column", "patterns": [SPLIT_PATTERN], "build": _build_split},
     {"operation": "extract_pattern", "patterns": EXTRACT_PATTERNS, "build": _build_extract_pattern},
@@ -881,33 +1083,100 @@ def parse_string(prompt, table=DEFAULT_TABLE):
 # ============================================================
 
 FILTER_PATTERNS = [
-    # Filter salary > 40000
-    r"filter\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+    # Filter salary > 40000 / Filter employment_status != PENDING
+    r"filter\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*([^\s,]+)",
     # where salary > 40000
-    r"where\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*(\d+)",
+    r"where\s+(\w+)\s*(>=|<=|>|<|==|=|!=)\s*([^\s,]+)",
+    # Filter employment_status is ACTIVE / equals ACTIVE
+    r"(?:filter|where)\s+(\w+)\s+(?:is|equals?|equal\s+to)\s+([^\s,]+)",
+    # whose employment_status is ACTIVE (in case "whose" survives
+    # normalization instead of being rewritten to "Filter ...")
+    r"whose\s+(\w+)\s+is\s+([^\s,]+)",
     # salary greater than 40000
-    r"(.+?)\s+(greater than|more than|above|over|exceeds)\s+(\d+)",
+    r"(.+?)\s+(greater than|more than|above|over|exceeds)\s+([^\s,]+)",
     # salary less than 40000
-    r"(.+?)\s+(less than|below|under)\s+(\d+)",
+    r"(.+?)\s+(less than|below|under)\s+([^\s,]+)",
 ]
 
 
+_NEGATE_OPERATOR = {
+    "==": "!=", "!=": "==",
+    ">": "<=", "<=": ">",
+    "<": ">=", ">=": "<",
+}
+
+
+def _is_negated_filter(prompt, match_start):
+    """
+    "Filter/keep only/where X is Y" means KEEP rows matching the
+    condition. "Remove/delete/exclude rows where X is Y" means the
+    OPPOSITE - keep rows that do NOT match. Both phrasings can
+    contain the word "where" ("remove rows WHERE status is
+    cancelled" vs "filter WHERE status is cancelled"), so the
+    keyword a pattern matched on isn't enough by itself - look at
+    which verb actually introduced this clause: whichever of
+    remove/delete/exclude vs keep/filter/select/retain appears
+    LAST (closest to the match) in the text just before it.
+    """
+
+    window = prompt[max(0, match_start - 60):match_start].lower()
+
+    def _last_of(words):
+        positions = [window.rfind(w) for w in words]
+        positions = [p for p in positions if p != -1]
+        return max(positions) if positions else -1
+
+    last_negate = _last_of(("remove", "delete", "exclude"))
+    last_keep = _last_of(("keep", "filter", "select", "retain"))
+
+    return last_negate != -1 and last_negate > last_keep
+
+
 def _build_filter(m, table, prompt):
-    operator = FILTER_OPERATOR_MAP.get(m.group(2), m.group(2))
+
+    # The "is"/"whose ... is" patterns have only 2 groups (column,
+    # value) - the operator is implied ("=="), not captured.
+    if m.lastindex == 2:
+        operator = "=="
+        raw_value = m.group(2)
+    else:
+        operator = FILTER_OPERATOR_MAP.get(m.group(2).lower(), m.group(2))
+        raw_value = m.group(3)
+
+    if _is_negated_filter(prompt, m.start()):
+        operator = _NEGATE_OPERATOR.get(operator, operator)
+
+    value = strip_quotes(raw_value.strip(" ,.;:"))
+
+    if value.isdigit():
+        value = int(value)
+    elif re.fullmatch(r"\d+\.\d+", value):
+        value = float(value)
+
     return {
         "input": table, "output": table,
-        "column": m.group(1), "operator": operator,
-        "value": int(m.group(3)),
+        "column": normalize_col(m.group(1)), "operator": operator,
+        "value": value,
     }
 
 
 FILTER_RULES = [
-    {"operation": "filter_rows", "patterns": FILTER_PATTERNS, "build": _build_filter},
+    {
+        "operation": "filter_rows",
+        "mode": "all",
+        "patterns": FILTER_PATTERNS,
+        "build": _build_filter,
+    },
 ]
 
 
 def parse_filter(prompt, table=DEFAULT_TABLE):
-    prompt = prompt.lower()
+    # NOTE: do NOT lowercase the whole prompt here (as before) - by
+    # the time filter_rows runs, an earlier uppercase/lowercase
+    # step may already have changed the real column's casing (e.g.
+    # employment_status -> "ACTIVE"), so the literal captured here
+    # must keep its original case to match. re.I on the patterns
+    # already makes the *keyword* matching case-insensitive.
     return run_pattern_rules(prompt, FILTER_RULES, table)
 
 
@@ -1455,6 +1724,8 @@ def enforce_dependency_order(pipeline):
 PARSERS = [
     ("read", parse_read),
     ("column", parse_column),
+    ("sort", parse_sort),
+    ("replace", parse_replace_global),
     ("math", parse_math),
     ("string", parse_string),
     ("filter", parse_filter),
@@ -1479,7 +1750,14 @@ def build_regex_pipeline(prompt):
     pipeline = []
 
     for name, parser in PARSERS:
-        steps = parser(prompt, table)
+        try:
+            steps = parser(prompt, table)
+        except Exception as e:
+            # One parser family failing on an unusual phrasing must
+            # not cost the user every OTHER operation in their
+            # prompt too - log it and keep going with the rest.
+            print(f"parser: '{name}' parser failed on this prompt -> {e}")
+            steps = []
         pipeline.extend(steps)
 
     return pipeline

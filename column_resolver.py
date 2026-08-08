@@ -59,6 +59,73 @@ def read_actual_columns(file_path):
         return []
 
 
+def read_actual_data_sample(file_path, sample_rows=1000):
+    """
+    Read a sample of the ACTUAL DATA (not just headers) for a
+    csv/xlsx/json file. Returns {column_name: set_of_values_seen}
+    (values lowercased/stringified for case-insensitive lookup), or
+    {} if the file can't be read.
+
+    This is what lets a column-less "replace 'delhi' with 'new
+    delhi'" step get scoped to the right column WITHOUT hardcoding
+    any domain knowledge like "delhi is a city name" - instead of
+    guessing from the word itself, this looks at where that value
+    actually appears in the user's own uploaded data.
+    """
+
+    if not file_path or not os.path.exists(file_path):
+        return {}
+
+    try:
+        ext = os.path.splitext(file_path)[1].lower()
+
+        if ext == ".csv":
+            df = pd.read_csv(file_path, nrows=sample_rows, dtype=str)
+
+        elif ext in (".xlsx", ".xls"):
+            df = pd.read_excel(file_path, nrows=sample_rows, dtype=str)
+
+        elif ext == ".json":
+            df = pd.read_json(file_path).head(sample_rows).astype(str)
+
+        else:
+            return {}
+
+        return {
+            col: set(
+                df[col].dropna().astype(str).str.strip().str.lower()
+            )
+            for col in df.columns
+        }
+
+    except Exception as e:
+        print("column_resolver: could not read data sample ->", e)
+        return {}
+
+
+def infer_replace_column(old_value, data_sample):
+    """
+    Given {column: set_of_values} from read_actual_data_sample,
+    find which column's real data actually contains old_value
+    (case-insensitive). Returns that column name if EXACTLY ONE
+    column matches, else None - if it's ambiguous (or the value
+    isn't found anywhere, e.g. no file was uploaded), it's safer
+    to leave the replace unscoped than to guess wrong.
+    """
+
+    if not isinstance(old_value, str) or not data_sample:
+        return None
+
+    needle = old_value.strip().lower()
+
+    matches = [
+        col for col, values in data_sample.items()
+        if needle in values
+    ]
+
+    return matches[0] if len(matches) == 1 else None
+
+
 def _normalize(text):
     """Loose normalization so 'Full Name', 'full_name', 'FullName'
     all compare equal."""
@@ -82,7 +149,7 @@ _OP_COLUMN_SPEC = {
     "select_columns":     {"resolve_list": ["cols"]},
     "drop_columns":       {"resolve_list": ["cols"]},
     "drop_duplicates":    {"resolve_list": ["subset"]},
-    "sort_values":        {"resolve": ["by"]},
+    "sort_values":        {"resolve_list": ["by"]},
     "filter_rows":        {"resolve": ["column"]},
     "fill_missing":       {"resolve": ["column"]},
     "uppercase":          {"resolve": ["col"], "mirror": [("col", "output_col")]},
@@ -138,12 +205,31 @@ class ColumnResolver:
         return name
 
     def register(self, name):
-        """Record a column the pipeline itself just created, so
+        """Record a column the pipeline itself just created (with
+        no prior name - e.g. add_column, combine_columns), so
         later steps referencing it resolve to the exact same name
         instead of being fuzzy-matched elsewhere."""
 
         if name and isinstance(name, str):
             self.known[_normalize(name)] = name
+
+    def rename(self, old_name, new_name):
+        """
+        Record that a column was renamed. Any FUTURE reference to
+        old_name - exact or fuzzy - must now resolve to new_name,
+        since by the time later steps actually run, the column
+        only exists under its new name. Without this, a later step
+        that still refers to the pre-rename name (including one
+        inferred from real data, which naturally reports the
+        ORIGINAL header) would target a column that's already been
+        renamed out from under it.
+        """
+
+        if old_name and isinstance(old_name, str):
+            self.known[_normalize(old_name)] = new_name
+
+        if new_name and isinstance(new_name, str):
+            self.known[_normalize(new_name)] = new_name
 
 
 def remap_pipeline_columns(pipeline, file_path):
@@ -162,6 +248,12 @@ def remap_pipeline_columns(pipeline, file_path):
 
     resolver = ColumnResolver(actual_columns)
 
+    # Loaded lazily (only if a column-less replace_str actually
+    # shows up) since it means reading real row data, not just
+    # headers - no point paying that cost for prompts that don't
+    # need it.
+    data_sample = None
+
     for step in pipeline:
 
         try:
@@ -175,9 +267,23 @@ def remap_pipeline_columns(pipeline, file_path):
                 for old, new in step["mapping"].items():
                     resolved_old = resolver.resolve(old)
                     new_mapping[resolved_old] = new
-                    resolver.register(new)
+                    resolver.rename(resolved_old, new)
                 step["mapping"] = new_mapping
                 continue
+
+            # A replace_str step with no column named at all (the
+            # prompt just said "replace X with Y", never "in
+            # <column>") - figure out which real column X actually
+            # lives in, from the data itself, rather than leaving
+            # it unscoped or guessing from the word X alone.
+            if op == "replace_str" and not step.get("col"):
+                if data_sample is None:
+                    data_sample = read_actual_data_sample(file_path)
+
+                inferred_col = infer_replace_column(step.get("old"), data_sample)
+
+                if inferred_col:
+                    step["col"] = resolver.resolve(inferred_col)
 
             spec = _OP_COLUMN_SPEC.get(op)
             if not spec:

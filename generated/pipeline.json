@@ -1,70 +1,97 @@
 [
     {
-        "id": 178609517585469,
-        "operation": "read_csv",
+        "id": 178617130699920,
+        "operation": "read_excel_any",
         "output": "dataframe",
-        "path": "sales_transactions_2026.csv",
-        "sheet_name": "Sheet1"
+        "path": "company_employees.xlsx",
+        "sheet_name": "EmployeeData"
     },
     {
-        "id": 178609517585456,
+        "id": 178617130701530,
         "operation": "drop_duplicates",
         "input": "dataframe",
         "output": "dataframe",
         "subset": [
-            "invoice_number"
+            "employee_id"
         ]
     },
     {
-        "id": 178609517585425,
+        "id": 178617130701549,
         "operation": "fill_missing",
         "input": "dataframe",
         "output": "dataframe",
-        "column": "amount",
+        "column": "salary",
         "value": 0
     },
     {
-        "id": 178609517585436,
+        "id": 178617130701583,
         "operation": "fill_missing",
         "input": "dataframe",
         "output": "dataframe",
-        "column": "customer_city",
-        "value": "'unknown'"
+        "column": "performance_score",
+        "value": 0
     },
     {
-        "id": 178609517585446,
+        "id": 178617130701555,
+        "operation": "fill_missing",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "department",
+        "value": "Unknown"
+    },
+    {
+        "id": 178617130701128,
         "operation": "select_columns",
         "input": "dataframe",
         "output": "dataframe",
         "cols": [
-            "invoice_number",
-            "customer_name",
-            "customer_city",
-            "product",
-            "quantity",
-            "amount",
-            "payment_status"
+            "employee_id",
+            "fullname",
+            "city",
+            "salary",
+            "department",
+            "performance_score",
+            "experience_years",
+            "employment_status"
         ]
     },
     {
-        "id": 178609517585449,
+        "id": 178617130700321,
         "operation": "rename_columns",
         "input": "dataframe",
         "output": "dataframe",
         "mapping": {
-            "customer_city": "city"
+            "fullname": "employee_name"
         }
     },
     {
-        "id": 178609517585797,
+        "id": 178617130700380,
+        "operation": "rename_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "mapping": {
+            "department": "team"
+        }
+    },
+    {
+        "id": 178617130700324,
+        "operation": "rename_columns",
+        "input": "dataframe",
+        "output": "dataframe",
+        "mapping": {
+            "performance_score": "score"
+        }
+    },
+    {
+        "id": 178617130703646,
         "operation": "uppercase",
         "input": "dataframe",
         "output": "dataframe",
-        "col": "customer_name",
-        "output_col": "customer_name"
+        "col": "employee_name",
+        "output_col": "employee_name"
     },
     {
-        "id": 178609517585887,
+        "id": 178617130703981,
         "operation": "lowercase",
         "input": "dataframe",
         "output": "dataframe",
@@ -72,41 +99,73 @@
         "output_col": "city"
     },
     {
-        "id": 178609517585775,
+        "id": 178617130703637,
         "operation": "uppercase",
         "input": "dataframe",
         "output": "dataframe",
-        "col": "status",
-        "output_col": "status"
+        "col": "employment_status",
+        "output_col": "employment_status"
     },
     {
-        "id": 178609517585810,
+        "id": 178617130702248,
         "operation": "replace_str",
         "input": "dataframe",
         "output": "dataframe",
-        "old": "'mumbai'",
-        "new": "'bombay'"
+        "old": "delhi",
+        "new": "new delhi"
     },
     {
-        "id": 178609517585870,
+        "id": 178617130702217,
         "operation": "replace_str",
         "input": "dataframe",
         "output": "dataframe",
-        "old": "'delhi'",
-        "new": "'new delhi'"
+        "old": "mumbai",
+        "new": "bombay"
     },
     {
-        "id": 178609517585473,
+        "id": 178617130702299,
+        "operation": "replace_str",
+        "input": "dataframe",
+        "output": "dataframe",
+        "old": "bangalore",
+        "new": "bengaluru"
+    },
+    {
+        "id": 178617130704427,
+        "operation": "filter_rows",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "score",
+        "operator": ">",
+        "value": 60
+    },
+    {
+        "id": 178617130704441,
+        "operation": "filter_rows",
+        "input": "dataframe",
+        "output": "dataframe",
+        "column": "employment_status",
+        "operator": "==",
+        "value": "ACTIVE"
+    },
+    {
+        "id": 178617130702176,
         "operation": "sort_values",
         "input": "dataframe",
         "output": "dataframe",
-        "by": "amount descending, quantity",
-        "ascending": false
+        "by": [
+            "score",
+            "salary"
+        ],
+        "ascending": [
+            false,
+            false
+        ]
     },
     {
-        "id": 178609517586078,
+        "id": 178617130705631,
         "operation": "write_csv",
         "input": "dataframe",
-        "path": "sales_transactions_cleaned.csv"
+        "path": "employee_performance_final.csv"
     }
 ]

@@ -3,20 +3,39 @@ import re
 from google import genai
 from dotenv import load_dotenv
 
-from llm.prompt import SYSTEM_PROMPT
+try:
+    from llm.prompt import SYSTEM_PROMPT
+except ModuleNotFoundError:
+    from prompt import SYSTEM_PROMPT
 
 load_dotenv()
 
-client = genai.Client(
-    api_key=os.getenv("GEMINI_API_KEY")
-)
+MODEL_NAME = "gemini-3.6-flash"
 
-MODEL_NAME = "gemini-2.5-flash"
+_client = None
+
+
+def _get_client():
+    """
+    Build the Gemini client lazily, on first use, instead of at
+    import time. A missing/invalid GEMINI_API_KEY (or any other
+    client-construction error) then only fails the individual
+    request - it can't take down the whole app on startup.
+    """
+
+    global _client
+
+    if _client is None:
+        _client = genai.Client(
+            api_key=os.getenv("GEMINI_API_KEY")
+        )
+
+    return _client
 
 
 def normalize_prompt(user_prompt):
 
-    response = client.models.generate_content(
+    response = _get_client().models.generate_content(
         model=MODEL_NAME,
         contents=(
             SYSTEM_PROMPT +
